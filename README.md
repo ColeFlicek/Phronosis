@@ -14,20 +14,6 @@ Three layers work together: a **call graph** for structural relationships, a **s
 | Semantic Embeddings | What functions are conceptually similar to this snippet? | neo4j vector index |
 | Decision Memory | Why was this written this way? What was tried before? | Graphiti + SQLite |
 
-## MCP tools
-
-```
-index_project(path)                    — full initial index of a project directory
-index_changes(file_paths, contents)    — incremental update after edits
-get_callers(function_name)             — everything that calls this function
-get_callees(function_name)             — everything this function calls
-get_impact_radius(function_name, depth)— blast radius of a change, N levels out
-query_similar_functions(snippet, top_k)— semantically similar functions
-log_decision(type, description, ...)   — record an architectural/design decision
-get_decision_history(function_name)    — full decision lineage for a function
-query_decisions(query_text)            — semantic search over all decisions
-```
-
 ---
 
 ## Prerequisites
@@ -47,6 +33,20 @@ cd ACIP
 ```
 
 The setup script asks for your credentials, picks an embedding provider, and starts the server. No manual config file editing required.
+
+---
+
+## Web dashboard
+
+Once running, open **`http://localhost:3004/ui`** in your browser.
+
+| Tab | What it shows |
+|---|---|
+| **Overview** | Live status for all three layers — animated health indicators, counts, and a table of every indexed project |
+| **Settings** | Embedding config form (saves to `/data/config.json`, no restart needed to edit — only to apply); API key presence display with redacted previews and instructions for adding, changing, or deleting keys |
+| **Admin** | Health check tool that tests live connectivity to each layer and returns a JSON report |
+
+API keys are never transmitted to the dashboard — only whether they are set and a redacted preview (`sk-ant-api03-•••YZ4`) are shown.
 
 ---
 
@@ -80,9 +80,25 @@ This builds the call graph, generates a one-sentence summary per function (via C
 
 ---
 
+## MCP tools
+
+```
+index_project(path)                    — full initial index of a project directory
+index_changes(file_paths, contents)    — incremental update after edits
+get_callers(function_name)             — everything that calls this function
+get_callees(function_name)             — everything this function calls
+get_impact_radius(function_name, depth)— blast radius of a change, N levels out
+query_similar_functions(snippet, top_k)— semantically similar functions
+log_decision(type, description, ...)   — record an architectural/design decision
+get_decision_history(function_name)    — full decision lineage for a function
+query_decisions(query_text)            — semantic search over all decisions
+```
+
+---
+
 ## Embedding models
 
-The embedding provider and model are controlled by environment variables — edit `.env` to switch, then restart with `docker compose restart code-intel`.
+Switch providers at any time from the **Settings** tab in the dashboard, or by editing `.env` directly.
 
 | Variable | Default | Description |
 |---|---|---|
