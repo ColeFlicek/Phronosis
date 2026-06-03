@@ -29,14 +29,43 @@ query_decisions(query_text)
 - **FastMCP** — Python MCP server on port 3004
 - **neo4j 5** — Graphiti backend + vector index for embeddings
 - **tree-sitter** — call graph parsing (Python, TypeScript)
-- **OpenAI text-embedding-3-small** — function embeddings
+- **Configurable embedding model** — OpenAI or Ollama (see below)
 - **Claude Haiku** — one-time LLM summary generation per function
+
+## Embedding model configuration
+
+The embedding provider and model are fully configurable via environment variables. No code changes needed to switch.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_PROVIDER` | `openai` | `openai` or `ollama` |
+| `EMBEDDING_MODEL` | provider default | Model name (see table below) |
+| `EMBEDDING_DIM` | inferred | Vector dimensions — inferred for known models, set explicitly for others |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL (only used when provider is `ollama`) |
+
+### Supported models (auto-inferred dimensions)
+
+| Provider | Model | Dimensions |
+|---|---|---|
+| `openai` | `text-embedding-3-small` *(default)* | 1536 |
+| `openai` | `text-embedding-3-large` | 3072 |
+| `openai` | `text-embedding-ada-002` | 1536 |
+| `ollama` | `nomic-embed-code` *(default)* | 768 |
+| `ollama` | `nomic-embed-text` | 768 |
+| `ollama` | `mxbai-embed-large` | 1024 |
+| `ollama` | `all-minilm` | 384 |
+
+Any model served by Ollama's OpenAI-compatible endpoint works — set `EMBEDDING_DIM` explicitly if your model isn't in the table above.
+
+> **Switching models:** The neo4j vector index is created at a fixed dimension. If you change `EMBEDDING_MODEL` or `EMBEDDING_DIM` after initial setup, you must wipe the existing index first: `docker compose down -v && docker compose up -d`, then re-run `index_project`.
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# Fill in NEO4J_PASSWORD, OPENAI_API_KEY, ANTHROPIC_API_KEY
+# Required: NEO4J_PASSWORD, ANTHROPIC_API_KEY
+# Required for OpenAI embeddings: OPENAI_API_KEY
+# For Ollama: set EMBEDDING_PROVIDER=ollama and ensure Ollama is running
 docker compose up -d
 ```
 

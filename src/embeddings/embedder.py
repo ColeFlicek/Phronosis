@@ -9,9 +9,48 @@ from openai import AsyncOpenAI
 
 from .chunker import FunctionChunk, prepare_embed_text
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
 SUMMARY_MODEL = "claude-haiku-4-5-20251001"
+
+# ── Embedding config ───────────────────────────────────────────────────────────
+# Known vector dimensions per model name. Add entries here as you add models.
+_KNOWN_DIMS: dict[str, int] = {
+    # OpenAI
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+    # Ollama (nomic, mxbai, etc.)
+    "nomic-embed-code": 768,
+    "nomic-embed-text": 768,
+    "mxbai-embed-large": 1024,
+    "all-minilm": 384,
+}
+
+# Sensible defaults per provider when the user hasn't set the model explicitly
+_PROVIDER_DEFAULTS: dict[str, tuple[str, int]] = {
+    "openai": ("text-embedding-3-small", 1536),
+    "ollama": ("nomic-embed-code", 768),
+}
+
+
+def _resolve_config() -> tuple[str, str, int, str]:
+    """Return (provider, model, dim, ollama_base_url) from environment."""
+    provider = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
+    default_model, default_dim = _PROVIDER_DEFAULTS.get(provider, ("text-embedding-3-small", 1536))
+    model = os.getenv("EMBEDDING_MODEL", default_model)
+    dim = int(os.getenv("EMBEDDING_DIM", str(_KNOWN_DIMS.get(model, default_dim))))
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    return provider, model, dim, ollama_url
+
+
+def _make_embed_client(provider: str, ollama_base_url: str) -> AsyncOpenAI:
+    """
+    Both OpenAI and Ollama are accessed via the OpenAI-compatible client.
+    Ollama exposes /v1/embeddings at its base URL.
+    """
+    if provider == "ollama":
+        return AsyncOpenAI(base_url=f"{ollama_base_url}/v1", api_key="ollama")
+    return AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 
 _CREATE_VECTOR_INDEX = """
 CREATE VECTOR INDEX function_embeddings IF NOT EXISTS
@@ -64,8 +103,14 @@ class EmbeddingStore:
         self._user = neo4j_user
         self._password = neo4j_password
         self._driver: AsyncDriver | None = None
-        self._openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self._anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        self._provider, self._model, self._dim, ollama_url = _resolve_config()
+        self._embed_client = _make_embed_client(self._provider, ollama_url)
+
+        print(
+            f"[embeddings] provider={self._provider} model={self._model} dim={self._dim}"
+        )
 
     @classmethod
     async def create(cls, neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> "EmbeddingStore":
@@ -76,7 +121,12 @@ class EmbeddingStore:
     async def init(self) -> None:
         self._driver = AsyncGraphDatabase.driver(self._uri, auth=(self._user, self._password))
         async with self._driver.session() as session:
-            await session.run(_CREATE_VECTOR_INDEX, dim=EMBEDDING_DIM)
+            # NOTE: If you change EMBEDDING_MODEL/EMBEDDING_DIM after the index was
+            # already created, you must drop the old index first:
+            #   MATCH (n:Function) DETACH DELETE n;
+            #   DROP INDEX function_embeddings;
+            # Then restart the server to recreate it at the new dimension.
+            await session.run(_CREATE_VECTOR_INDEX, dim=self._dim)
 
     async def close(self) -> None:
         if self._driver:
@@ -150,7 +200,7 @@ class EmbeddingStore:
     # ── Internals ──────────────────────────────────────────────────────────
 
     async def _embed_single(self, text: str) -> list[float]:
-        resp = await self._openai.embeddings.create(model=EMBEDDING_MODEL, input=text)
+        resp = await self._embed_client.embeddings.create(model=self._model, input=text)
         return resp.data[0].embedding
 
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -161,7 +211,7 @@ class EmbeddingStore:
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            resp = await self._openai.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+            resp = await self._embed_client.embeddings.create(model=self._model, input=batch)
             results.extend(item.embedding for item in sorted(resp.data, key=lambda x: x.index))
         return results
 
