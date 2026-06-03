@@ -36,7 +36,7 @@ async def _get_services() -> dict[str, Any]:
 
     db = await CallGraphDB.create(sqlite_path)
     embeddings = await EmbeddingStore.create(neo4j_uri, neo4j_user, neo4j_password)
-    decisions = await DecisionMemory.create(db, neo4j_uri, neo4j_user, neo4j_password)
+    decisions = await DecisionMemory.create(db, embeddings)
     indexer = Indexer(db, embeddings)
 
     _services.update(db=db, embeddings=embeddings, decisions=decisions, indexer=indexer)

@@ -145,6 +145,10 @@ class EmbeddingStore:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
+    async def embed(self, text: str) -> list[float]:
+        """Embed a single text string. Used by Layer 3 decision memory."""
+        return await self._embed_single(text)
+
     async def upsert_chunks(
         self,
         chunks: list[FunctionChunk],
