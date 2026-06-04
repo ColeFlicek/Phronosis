@@ -44,9 +44,10 @@ class Indexer:
             except Exception as exc:
                 print(f"[indexer] skipping {fp}: {exc}")
 
-        # Delete stale data for every file before upserting fresh data.
-        # Embeddings first (subquery needs nodes to resolve IDs).
-        for fp in source_files:
+        # Delete stale data only for files that were successfully parsed.
+        # Skipping failed files preserves their existing index data rather than
+        # wiping it to nothing (e.g. if tree-sitter crashes on a particular file).
+        for fp in contents:
             await self._embeddings.delete_by_file(fp)
             await self._db.delete_file_data(fp)
 
@@ -141,6 +142,8 @@ class Indexer:
 
         for fp in file_paths:
             content = file_contents.get(fp)
+            # delete_by_file uses a subquery on nodes — must run before delete_file_data.
+            await self._embeddings.delete_by_file(fp)
             await self._db.delete_file_data(fp)
             if content is None:
                 continue
