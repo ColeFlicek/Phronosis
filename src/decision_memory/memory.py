@@ -46,7 +46,14 @@ class DecisionMemory:
         decision_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
 
-        # Structured record → SQLite
+        # Compute embedding BEFORE any DB writes — if the API call fails, no partial state
+        # is left in the database.
+        reasoning = _reasoning_text(
+            type, description, rejected_alternatives, trigger, linked_function_ids or []
+        )
+        await self._embeddings.upsert_decision_embedding(decision_id, reasoning)
+
+        # Structured record → SQLite (only reached if embedding succeeded)
         await self._db.insert_decision({
             "id": decision_id,
             "type": type,
@@ -58,12 +65,6 @@ class DecisionMemory:
         })
         if linked_function_ids:
             await self._db.insert_decision_functions(decision_id, linked_function_ids)
-
-        # Reasoning embedding → sqlite-vec (via EmbeddingStore)
-        reasoning = _reasoning_text(
-            type, description, rejected_alternatives, trigger, linked_function_ids or []
-        )
-        await self._embeddings.upsert_decision_embedding(decision_id, reasoning)
 
         return {"decision_id": decision_id, "created_at": now}
 

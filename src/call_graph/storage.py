@@ -149,6 +149,7 @@ class CallGraphDB:
         targets = await self.find_node_by_name(function_name)
         if not targets:
             return []
+        seen: set[str] = set()
         results = []
         for t in targets:
             async with self._db.execute(
@@ -160,13 +161,17 @@ class CallGraphDB:
                 """,
                 (t["id"],),
             ) as cur:
-                results.extend(dict(r) for r in await cur.fetchall())
+                for r in await cur.fetchall():
+                    if r["id"] not in seen:
+                        seen.add(r["id"])
+                        results.append(dict(r))
         return results
 
     async def get_callees(self, function_name: str) -> list[dict]:
         targets = await self.find_node_by_name(function_name)
         if not targets:
             return []
+        seen: set[str] = set()
         results = []
         for t in targets:
             async with self._db.execute(
@@ -178,7 +183,10 @@ class CallGraphDB:
                 """,
                 (t["id"],),
             ) as cur:
-                results.extend(dict(r) for r in await cur.fetchall())
+                for r in await cur.fetchall():
+                    if r["id"] not in seen:
+                        seen.add(r["id"])
+                        results.append(dict(r))
         return results
 
     async def get_impact_radius(self, function_name: str, depth: int = 2) -> list[dict]:

@@ -128,6 +128,14 @@ class Indexer:
         self, file_paths: list[str], file_contents: dict[str, str], project_root: str = ""
     ) -> dict:
         """Re-parse call graph for the given files without touching embeddings."""
+        # Snapshot existing summaries before deletion so they survive the upsert.
+        existing_summaries: dict[str, str] = {}
+        for fp in file_paths:
+            if file_contents.get(fp) is not None:
+                for node in await self._db.get_nodes_by_file(fp):
+                    if node["summary"]:
+                        existing_summaries[node["id"]] = node["summary"]
+
         updated_nodes = []
         updated_edges = []
 
@@ -145,6 +153,9 @@ class Indexer:
 
         if updated_nodes:
             await self._db.upsert_nodes(updated_nodes)
+            # Restore summaries wiped by the delete+insert cycle.
+            for nid, summary in existing_summaries.items():
+                await self._db.update_summary(nid, summary)
         if updated_edges:
             all_ids = await self._db.get_all_node_ids()
             await self._db.upsert_edges(updated_edges, all_ids)
