@@ -65,7 +65,7 @@ class CallGraphDB:
         return obj
 
     async def init(self) -> None:
-        self._db = await aiosqlite.connect(self._path)
+        self._db = await aiosqlite.connect(self._path, check_same_thread=False)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(DDL)
         await self._db.commit()
