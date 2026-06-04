@@ -31,20 +31,8 @@ if [ -f .env ]; then
   [[ "$OVERWRITE" =~ ^[Yy]$ ]] || exit 0
 fi
 
-# ── Neo4j password ─────────────────────────────────────────────────────────────
-
-echo "Neo4j is used internally — you won't need to remember this password."
-read -rsp "Neo4j password (leave blank to auto-generate): " NEO4J_PASSWORD
-echo ""
-if [ -z "$NEO4J_PASSWORD" ]; then
-  NEO4J_PASSWORD=$(openssl rand -hex 20 2>/dev/null \
-    || LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32)
-  echo "  Generated: $NEO4J_PASSWORD"
-fi
-
 # ── Anthropic API key ──────────────────────────────────────────────────────────
 
-echo ""
 echo "Anthropic API key — used to generate one-line summaries per function."
 echo "Get one at: https://console.anthropic.com/settings/keys"
 read -rsp "Anthropic API key: " ANTHROPIC_API_KEY
@@ -89,7 +77,6 @@ fi
 # ── Write .env ─────────────────────────────────────────────────────────────────
 
 {
-  echo "NEO4J_PASSWORD=${NEO4J_PASSWORD}"
   echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}"
   echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
   echo "EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}"
@@ -114,7 +101,6 @@ if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
   echo ""
   echo "  Dashboard:     http://localhost:3004/ui"
   echo "  MCP endpoint:  http://localhost:3004/mcp"
-  echo "  Neo4j browser: http://localhost:7474"
   echo ""
   echo "Add to Claude Code MCP settings:"
   echo '  { "mcpServers": { "acip": { "url": "http://localhost:3004/mcp" } } }'

@@ -75,14 +75,12 @@ class Indexer:
 
         for fp in file_paths:
             content = file_contents.get(fp)
-            if content is None:
-                # File deleted — purge only
-                await self._db.delete_file_data(fp)
-                await self._embeddings.delete_by_file(fp)
-                continue
-
-            await self._db.delete_file_data(fp)
+            # Embeddings must be deleted BEFORE call graph data — delete_by_file
+            # uses a subquery into the nodes table to resolve IDs.
             await self._embeddings.delete_by_file(fp)
+            await self._db.delete_file_data(fp)
+            if content is None:
+                continue  # deleted file — purge only, nothing to re-index
 
             ext = Path(fp).suffix.lower()
             if ext not in _SUPPORTED_EXTENSIONS:

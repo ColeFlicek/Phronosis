@@ -11,8 +11,8 @@ Three layers work together: a **call graph** for structural relationships, a **s
 | Layer | What it answers | Storage |
 |---|---|---|
 | Call Graph | Who calls this? What does this call? What breaks if I change it? | SQLite |
-| Semantic Embeddings | What functions are conceptually similar to this snippet? | neo4j vector index |
-| Decision Memory | Why was this written this way? What was tried before? | Graphiti + SQLite |
+| Semantic Embeddings | What functions are conceptually similar to this snippet? | sqlite-vec virtual table |
+| Decision Memory | Why was this written this way? What was tried before? | sqlite-vec + SQLite |
 
 ---
 
@@ -146,8 +146,7 @@ See [`CLAUDE.md`](CLAUDE.md) for the recommended per-session workflow (what to c
 ## Stack
 
 - **[FastMCP](https://github.com/jlowin/fastmcp)** — Python MCP server framework
-- **[neo4j 5](https://neo4j.com)** — graph database + native vector index
-- **[Graphiti](https://github.com/getzep/graphiti)** — episodic memory for decision storage
+- **[sqlite-vec](https://github.com/asg017/sqlite-vec)** — vector search as a SQLite extension (no separate server)
 - **[tree-sitter](https://tree-sitter.github.io)** — call graph parsing (Python, TypeScript)
 - **[OpenAI](https://platform.openai.com) / [Ollama](https://ollama.com)** — embeddings (your choice)
 - **[Claude Haiku](https://anthropic.com)** — one-time function summary generation

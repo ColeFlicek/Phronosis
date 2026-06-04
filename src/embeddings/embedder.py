@@ -1,31 +1,26 @@
 from __future__ import annotations
 
 import os
+import struct
 from typing import Any
 
 from anthropic import AsyncAnthropic
-from neo4j import AsyncGraphDatabase, AsyncDriver
 from openai import AsyncOpenAI
 
 from .chunker import FunctionChunk, prepare_embed_text
 
 SUMMARY_MODEL = "claude-haiku-4-5-20251001"
 
-# ── Embedding config ───────────────────────────────────────────────────────────
-# Known vector dimensions per model name. Add entries here as you add models.
 _KNOWN_DIMS: dict[str, int] = {
-    # OpenAI
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
-    # Ollama (nomic, mxbai, etc.)
     "nomic-embed-code": 768,
     "nomic-embed-text": 768,
     "mxbai-embed-large": 1024,
     "all-minilm": 384,
 }
 
-# Sensible defaults per provider when the user hasn't set the model explicitly
 _PROVIDER_DEFAULTS: dict[str, tuple[str, int]] = {
     "openai": ("text-embedding-3-small", 1536),
     "ollama": ("nomic-embed-code", 768),
@@ -33,8 +28,6 @@ _PROVIDER_DEFAULTS: dict[str, tuple[str, int]] = {
 
 
 def _resolve_config() -> tuple[str, str, int, str]:
-    """Return (provider, model, dim, ollama_base_url).
-    config.json (written by the web UI) takes precedence over env vars."""
     try:
         from ..web.config_store import read_file_config
         file_cfg = read_file_config()
@@ -54,100 +47,94 @@ def _resolve_config() -> tuple[str, str, int, str]:
 
 
 def _make_embed_client(provider: str, ollama_base_url: str) -> AsyncOpenAI:
-    """
-    Both OpenAI and Ollama are accessed via the OpenAI-compatible client.
-    Ollama exposes /v1/embeddings at its base URL.
-    """
     if provider == "ollama":
         return AsyncOpenAI(base_url=f"{ollama_base_url}/v1", api_key="ollama")
     return AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-_CREATE_VECTOR_INDEX = """
-CREATE VECTOR INDEX function_embeddings IF NOT EXISTS
-FOR (n:Function)
-ON (n.embedding)
-OPTIONS {
-  indexConfig: {
-    `vector.dimensions`: $dim,
-    `vector.similarity_function`: 'cosine'
-  }
-}
-"""
+def _load_vec_ext(conn) -> None:
+    """Load sqlite-vec extension into a raw sqlite3 connection (called via run_sync)."""
+    import sqlite_vec
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
 
-_UPSERT_FUNCTION = """
-MERGE (n:Function {id: $id})
-SET n.file      = $file,
-    n.module    = $module,
-    n.type      = $type,
-    n.name      = $name,
-    n.signature = $signature,
-    n.summary   = $summary,
-    n.embedding = $embedding
-"""
 
-_QUERY_SIMILAR = """
-CALL db.index.vector.queryNodes('function_embeddings', $top_k, $embedding)
-YIELD node, score
-RETURN node.id AS id,
-       node.file AS file,
-       node.module AS module,
-       node.name AS name,
-       node.signature AS signature,
-       node.summary AS summary,
-       score
-ORDER BY score DESC
-"""
-
-_DELETE_BY_FILE = """
-MATCH (n:Function {file: $file}) DETACH DELETE n
-"""
-
-_DELETE_BY_IDS = """
-MATCH (n:Function) WHERE n.id IN $ids DETACH DELETE n
-"""
+def _f32(v: list[float]) -> bytes:
+    """Serialize a float list to IEEE 754 float32 bytes for sqlite-vec."""
+    return struct.pack(f"{len(v)}f", *v)
 
 
 class EmbeddingStore:
-    def __init__(self, neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> None:
-        self._uri = neo4j_uri
-        self._user = neo4j_user
-        self._password = neo4j_password
-        self._driver: AsyncDriver | None = None
-        self._anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    """
+    Manages all vector embeddings using sqlite-vec — no external server required.
 
+    Two vec0 virtual tables live in the same SQLite file as the call graph:
+      - function_embeddings  (Layer 2): code similarity — function bodies + summaries
+      - decision_embeddings  (Layer 3): reasoning similarity — intent + context
+
+    The connection is owned by CallGraphDB; this class borrows it.
+    """
+
+    def __init__(self, db) -> None:  # db: CallGraphDB (avoid circular import at type level)
+        self._db = db
+        self._anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         self._provider, self._model, self._dim, ollama_url = _resolve_config()
         self._embed_client = _make_embed_client(self._provider, ollama_url)
-
-        print(
-            f"[embeddings] provider={self._provider} model={self._model} dim={self._dim}"
-        )
+        print(f"[embeddings] provider={self._provider} model={self._model} dim={self._dim}")
 
     @classmethod
-    async def create(cls, neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> "EmbeddingStore":
-        obj = cls(neo4j_uri, neo4j_user, neo4j_password)
+    async def create(cls, db) -> "EmbeddingStore":
+        obj = cls(db)
         await obj.init()
         return obj
 
     async def init(self) -> None:
-        self._driver = AsyncGraphDatabase.driver(self._uri, auth=(self._user, self._password))
-        async with self._driver.session() as session:
-            # NOTE: If you change EMBEDDING_MODEL/EMBEDDING_DIM after the index was
-            # already created, you must drop the old index first:
-            #   MATCH (n:Function) DETACH DELETE n;
-            #   DROP INDEX function_embeddings;
-            # Then restart the server to recreate it at the new dimension.
-            await session.run(_CREATE_VECTOR_INDEX, dim=self._dim)
+        conn = self._db._db
+        await conn.run_sync(_load_vec_ext)
+
+        # Detect dimension mismatch before creating tables
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS _embedding_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        async with conn.execute(
+            "SELECT value FROM _embedding_meta WHERE key = 'embedding_dim'"
+        ) as cur:
+            row = await cur.fetchone()
+        if row and int(row[0]) != self._dim:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: stored index is {row[0]}d but configured "
+                f"model needs {self._dim}d. Delete SQLITE_PATH and restart to re-index."
+            )
+
+        await conn.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS function_embeddings USING vec0(
+                id TEXT PRIMARY KEY,
+                embedding FLOAT[{self._dim}]
+            )
+        """)
+        await conn.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS decision_embeddings USING vec0(
+                id TEXT PRIMARY KEY,
+                embedding FLOAT[{self._dim}]
+            )
+        """)
+        await conn.execute(
+            "INSERT OR REPLACE INTO _embedding_meta(key, value) VALUES ('embedding_dim', ?)",
+            (str(self._dim),)
+        )
+        await conn.commit()
 
     async def close(self) -> None:
-        if self._driver:
-            await self._driver.close()
+        pass  # connection owned by CallGraphDB
 
-    # ── Public API ─────────────────────────────────────────────────────────
+    # ── Shared ─────────────────────────────────────────────────────────────
 
     async def embed(self, text: str) -> list[float]:
-        """Embed a single text string. Used by Layer 3 decision memory."""
+        """Embed a single text string. Used directly by Layer 3."""
         return await self._embed_single(text)
+
+    # ── Layer 2: function embeddings ───────────────────────────────────────
 
     async def upsert_chunks(
         self,
@@ -155,66 +142,110 @@ class EmbeddingStore:
         existing_summaries: dict[str, str] | None = None,
         force_summaries: bool = False,
     ) -> None:
-        """Embed and store each chunk. Generates LLM summary on first embed.
-        Pass force_summaries=True to regenerate summaries even for known functions."""
         if not chunks:
             return
 
-        # Attach existing summaries unless forcing a regeneration
         if existing_summaries and not force_summaries:
             for chunk in chunks:
                 if not chunk.summary and chunk.id in existing_summaries:
                     chunk.summary = existing_summaries[chunk.id]
 
-        # Generate missing (or forced) summaries
         for chunk in chunks:
             if not chunk.summary or force_summaries:
                 chunk.summary = await self._generate_summary(chunk)
 
-        # Build embed texts and batch-embed
         texts = [prepare_embed_text(chunk) for chunk in chunks]
         embeddings = await self._embed_batch(texts)
 
-        async with self._driver.session() as session:
-            for chunk, embedding in zip(chunks, embeddings):
-                await session.run(
-                    _UPSERT_FUNCTION,
-                    id=chunk.id,
-                    file=chunk.file,
-                    module=chunk.module,
-                    type=chunk.type,
-                    name=chunk.name,
-                    signature=chunk.signature,
-                    summary=chunk.summary,
-                    embedding=embedding,
-                )
+        conn = self._db._db
+        for chunk, embedding in zip(chunks, embeddings):
+            await conn.execute(
+                "UPDATE nodes SET summary = ? WHERE id = ?", (chunk.summary, chunk.id)
+            )
+            await conn.execute(
+                "INSERT OR REPLACE INTO function_embeddings(id, embedding) VALUES (?, ?)",
+                (chunk.id, _f32(embedding))
+            )
+        await conn.commit()
 
     async def delete_by_file(self, file_path: str) -> None:
-        async with self._driver.session() as session:
-            await session.run(_DELETE_BY_FILE, file=file_path)
+        # Must be called BEFORE CallGraphDB.delete_file_data — we need nodes to resolve IDs.
+        conn = self._db._db
+        await conn.execute(
+            "DELETE FROM function_embeddings WHERE id IN (SELECT id FROM nodes WHERE file = ?)",
+            (file_path,)
+        )
+        await conn.commit()
 
     async def delete_by_ids(self, function_ids: list[str]) -> None:
         if not function_ids:
             return
-        async with self._driver.session() as session:
-            await session.run(_DELETE_BY_IDS, ids=function_ids)
+        conn = self._db._db
+        for fid in function_ids:
+            await conn.execute("DELETE FROM function_embeddings WHERE id = ?", (fid,))
+        await conn.commit()
 
     async def query_similar(self, snippet: str, top_k: int = 10) -> list[dict[str, Any]]:
         embedding = await self._embed_single(snippet)
-        async with self._driver.session() as session:
-            result = await session.run(_QUERY_SIMILAR, embedding=embedding, top_k=top_k)
-            return [dict(r) async for r in result]
+        conn = self._db._db
+        async with conn.execute(
+            """
+            SELECT knn.id, knn.distance,
+                   n.file, n.module, n.name, n.signature, n.summary
+            FROM (
+                SELECT id, distance
+                FROM function_embeddings
+                WHERE embedding MATCH ? AND k = ?
+                ORDER BY distance
+            ) knn
+            JOIN nodes n ON n.id = knn.id
+            """,
+            (_f32(embedding), top_k)
+        ) as cur:
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in await cur.fetchall()]
 
     async def get_summaries(self, function_ids: list[str]) -> dict[str, str]:
-        """Fetch existing summaries from neo4j to avoid re-generating on incremental updates."""
         if not function_ids:
             return {}
-        async with self._driver.session() as session:
-            result = await session.run(
-                "MATCH (n:Function) WHERE n.id IN $ids RETURN n.id AS id, n.summary AS summary",
-                ids=function_ids,
-            )
-            return {r["id"]: r["summary"] async for r in result}
+        conn = self._db._db
+        ph = ",".join("?" * len(function_ids))
+        async with conn.execute(
+            f"SELECT id, summary FROM nodes WHERE id IN ({ph})", function_ids
+        ) as cur:
+            return {r[0]: r[1] for r in await cur.fetchall()}
+
+    # ── Layer 3: decision embeddings ───────────────────────────────────────
+
+    async def upsert_decision_embedding(self, decision_id: str, text: str) -> None:
+        embedding = await self._embed_single(text)
+        conn = self._db._db
+        await conn.execute(
+            "INSERT OR REPLACE INTO decision_embeddings(id, embedding) VALUES (?, ?)",
+            (decision_id, _f32(embedding))
+        )
+        await conn.commit()
+
+    async def query_decision_embeddings(
+        self, query_text: str, top_k: int = 10
+    ) -> list[dict[str, Any]]:
+        embedding = await self._embed_single(query_text)
+        conn = self._db._db
+        async with conn.execute(
+            """
+            SELECT id, distance
+            FROM decision_embeddings
+            WHERE embedding MATCH ? AND k = ?
+            ORDER BY distance
+            """,
+            (_f32(embedding), top_k)
+        ) as cur:
+            return [{"id": r[0], "distance": r[1]} for r in await cur.fetchall()]
+
+    async def delete_decision_embedding(self, decision_id: str) -> None:
+        conn = self._db._db
+        await conn.execute("DELETE FROM decision_embeddings WHERE id = ?", (decision_id,))
+        await conn.commit()
 
     # ── Internals ──────────────────────────────────────────────────────────
 
@@ -225,11 +256,9 @@ class EmbeddingStore:
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        # OpenAI supports batch up to 2048 inputs; chunk for safety
         results: list[list[float]] = []
-        batch_size = 100
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
+        for i in range(0, len(texts), 100):
+            batch = texts[i:i + 100]
             resp = await self._embed_client.embeddings.create(model=self._model, input=batch)
             results.extend(item.embedding for item in sorted(resp.data, key=lambda x: x.index))
         return results
@@ -237,17 +266,14 @@ class EmbeddingStore:
     async def _generate_summary(self, chunk: FunctionChunk) -> str:
         prompt = (
             f"Write a single sentence describing what this function does.\n\n"
-            f"Function: {chunk.id}\n"
-            f"Signature: {chunk.signature}\n"
+            f"Function: {chunk.id}\nSignature: {chunk.signature}\n"
         )
         if chunk.docstring:
             prompt += f"Docstring: {chunk.docstring}\n"
         prompt += f"\nBody (truncated):\n{chunk.body[:800]}"
-
         try:
             resp = await self._anthropic.messages.create(
-                model=SUMMARY_MODEL,
-                max_tokens=80,
+                model=SUMMARY_MODEL, max_tokens=80,
                 messages=[{"role": "user", "content": prompt}],
             )
             return resp.content[0].text.strip()

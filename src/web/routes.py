@@ -17,7 +17,6 @@ def register_routes(mcp, get_services) -> None:
     async def dashboard(request: Request) -> HTMLResponse:
         return HTMLResponse(HTML)
 
-    # Redirect bare /  to /ui
     @mcp.custom_route("/", methods=["GET"])
     async def root_redirect(request: Request) -> HTMLResponse:
         return HTMLResponse('<meta http-equiv="refresh" content="0;url=/ui">', status_code=302)
@@ -38,18 +37,16 @@ def register_routes(mcp, get_services) -> None:
             db = svcs["db"]
             embeddings = svcs["embeddings"]
 
-            # ── Call graph ─────────────────────────
+            # ── Call graph ─────────────────────────────────────────────────
             async with db._db.execute("SELECT COUNT(*) FROM nodes") as cur:
                 nodes = (await cur.fetchone())[0]
             async with db._db.execute("SELECT COUNT(*) FROM edges") as cur:
                 edges = (await cur.fetchone())[0]
             result["layers"]["call_graph"] = {"status": "ok", "nodes": nodes, "edges": edges}
 
-            # ── Embeddings ──────────────────────────
-            async with embeddings._driver.session() as session:
-                r = await session.run("MATCH (n:Function) RETURN count(n) AS c")
-                rec = await r.single()
-                emb_count = rec["c"] if rec else 0
+            # ── Embeddings (sqlite-vec) ─────────────────────────────────────
+            async with db._db.execute("SELECT COUNT(*) FROM function_embeddings") as cur:
+                emb_count = (await cur.fetchone())[0]
             result["layers"]["embeddings"] = {
                 "status": "ok",
                 "functions": emb_count,
@@ -58,14 +55,23 @@ def register_routes(mcp, get_services) -> None:
                 "dim": embeddings._dim,
             }
 
-            # ── Decisions ───────────────────────────
+            # ── Decision memory ────────────────────────────────────────────
             async with db._db.execute("SELECT COUNT(*) FROM decisions") as cur:
                 dec_count = (await cur.fetchone())[0]
-            async with db._db.execute("SELECT COUNT(DISTINCT function_id) FROM decision_functions") as cur:
+            async with db._db.execute(
+                "SELECT COUNT(DISTINCT function_id) FROM decision_functions"
+            ) as cur:
                 linked = (await cur.fetchone())[0]
-            result["layers"]["decisions"] = {"status": "ok", "count": dec_count, "linked_functions": linked}
+            async with db._db.execute("SELECT COUNT(*) FROM decision_embeddings") as cur:
+                dec_emb_count = (await cur.fetchone())[0]
+            result["layers"]["decisions"] = {
+                "status": "ok",
+                "count": dec_count,
+                "linked_functions": linked,
+                "embedded": dec_emb_count,
+            }
 
-            # ── Running config ──────────────────────
+            # ── Running config ─────────────────────────────────────────────
             running = {
                 "EMBEDDING_PROVIDER": embeddings._provider,
                 "EMBEDDING_MODEL": embeddings._model,
@@ -74,14 +80,13 @@ def register_routes(mcp, get_services) -> None:
             }
             result["config"] = running
 
-            # Config differs?
             pending = result["pending_config"]
             result["config_differs"] = any(
                 pending.get(k) and str(pending[k]) != str(running.get(k, ""))
                 for k in ("EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIM")
             )
 
-            # ── Projects ────────────────────────────
+            # ── Projects ───────────────────────────────────────────────────
             async with db._db.execute("SELECT DISTINCT file FROM nodes") as cur:
                 files = [r[0] for r in await cur.fetchall()]
 
@@ -94,18 +99,14 @@ def register_routes(mcp, get_services) -> None:
                     "SELECT COUNT(*) FROM edges WHERE file LIKE ?", (root + "%",)
                 ) as cur:
                     groups[root]["edges"] = (await cur.fetchone())[0]
+                async with db._db.execute(
+                    """SELECT COUNT(*) FROM function_embeddings
+                       WHERE id IN (SELECT id FROM nodes WHERE file LIKE ?)""",
+                    (root + "%",)
+                ) as cur:
+                    groups[root]["embedded"] = (await cur.fetchone())[0]
 
-                async with embeddings._driver.session() as session:
-                    r = await session.run(
-                        "MATCH (n:Function) WHERE n.file STARTS WITH $r RETURN count(n) AS c",
-                        r=root,
-                    )
-                    rec = await r.single()
-                    groups[root]["embedded"] = rec["c"] if rec else 0
-
-            result["projects"] = [
-                {"path": k, **v} for k, v in sorted(groups.items())
-            ]
+            result["projects"] = [{"path": k, **v} for k, v in sorted(groups.items())]
 
         except Exception as exc:
             for layer in ("call_graph", "embeddings", "decisions"):
@@ -140,10 +141,15 @@ def register_routes(mcp, get_services) -> None:
                 result["call_graph"] = {"status": "error", "error": str(e)}
 
             try:
-                async with embeddings._driver.session() as session:
-                    r = await session.run("MATCH (n:Function) RETURN count(n) AS c")
-                    rec = await r.single()
-                result["embeddings"] = {"status": "ok", "function_count": rec["c"] if rec else 0}
+                async with db._db.execute("SELECT COUNT(*) FROM function_embeddings") as cur:
+                    n = (await cur.fetchone())[0]
+                async with db._db.execute("SELECT COUNT(*) FROM decision_embeddings") as cur:
+                    d = (await cur.fetchone())[0]
+                result["embeddings"] = {
+                    "status": "ok",
+                    "function_vectors": n,
+                    "decision_vectors": d,
+                }
             except Exception as e:
                 result["embeddings"] = {"status": "error", "error": str(e)}
 
@@ -158,6 +164,7 @@ def register_routes(mcp, get_services) -> None:
                 "provider": embeddings._provider,
                 "model": embeddings._model,
                 "dimensions": embeddings._dim,
+                "storage": "sqlite-vec",
             }
         except Exception as exc:
             result["server"] = {"status": "error", "error": str(exc)}

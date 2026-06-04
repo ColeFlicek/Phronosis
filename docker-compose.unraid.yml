@@ -6,13 +6,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.unraid.yml up -d
 
 services:
-  neo4j:
-    volumes:
-      - /mnt/user/appdata/acip/neo4j:/data
-
   acip:
     volumes:
-      - /mnt/user/appdata/acip/sqlite:/data
+      - /mnt/user/appdata/acip:/data
     # Allows the container to reach Ollama running on the Unraid host
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -29,13 +29,10 @@ async def _get_services() -> dict[str, Any]:
     if _services:
         return _services
 
-    neo4j_uri = os.environ["NEO4J_URI"]
-    neo4j_user = os.environ["NEO4J_USER"]
-    neo4j_password = os.environ["NEO4J_PASSWORD"]
-    sqlite_path = os.getenv("SQLITE_PATH", "/data/call_graph.db")
+    sqlite_path = os.getenv("SQLITE_PATH", "/data/acip.db")
 
     db = await CallGraphDB.create(sqlite_path)
-    embeddings = await EmbeddingStore.create(neo4j_uri, neo4j_user, neo4j_password)
+    embeddings = await EmbeddingStore.create(db)
     decisions = await DecisionMemory.create(db, embeddings)
     indexer = Indexer(db, embeddings)
 
@@ -47,10 +44,6 @@ async def _get_services() -> dict[str, Any]:
 async def lifespan(server: FastMCP):
     await _get_services()
     yield
-    if _services.get("embeddings"):
-        await _services["embeddings"].close()
-    if _services.get("decisions"):
-        await _services["decisions"].close()
     if _services.get("db"):
         await _services["db"].close()
 
