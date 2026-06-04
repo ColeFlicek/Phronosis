@@ -32,6 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_caller  ON edges(caller_id);
 CREATE INDEX IF NOT EXISTS idx_edges_callee  ON edges(callee_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_file    ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_name    ON nodes(name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique ON edges(caller_id, callee_id, edge_type, file);
 
 CREATE TABLE IF NOT EXISTS decisions (
     id                   TEXT PRIMARY KEY,
@@ -67,6 +68,11 @@ class CallGraphDB:
     async def init(self) -> None:
         self._db = await aiosqlite.connect(self._path, check_same_thread=False)
         self._db.row_factory = aiosqlite.Row
+        # Dedup edges before applying the unique index (handles pre-existing databases).
+        await self._db.execute(
+            "DELETE FROM edges WHERE rowid NOT IN "
+            "(SELECT MIN(rowid) FROM edges GROUP BY caller_id, callee_id, edge_type, file)"
+        )
         await self._db.executescript(DDL)
         await self._db.commit()
 

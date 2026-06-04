@@ -69,14 +69,15 @@ async def index_project(path: str) -> str:
 
 
 @mcp.tool()
-async def index_changes(file_paths: list[str], file_contents: dict[str, str]) -> str:
+async def index_changes(file_paths: list[str], file_contents: dict[str, str], project_root: str = "") -> str:
     """
     Incremental update for changed files. Pass the paths and current contents
     of modified files. Stale call graph edges and embeddings are dropped and
-    replaced. Call this after every edit session to keep the index fresh.
+    replaced. Pass project_root (same value used in index_project) to ensure
+    module IDs are consistent with the full index.
     """
     svcs = await _get_services()
-    result = await svcs["indexer"].index_changes(file_paths, file_contents)
+    result = await svcs["indexer"].index_changes(file_paths, file_contents, project_root=project_root)
     return json.dumps(result)
 
 

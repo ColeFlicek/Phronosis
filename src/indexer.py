@@ -63,12 +63,20 @@ class Indexer:
             "edges_indexed": len(all_edges),
         }
 
-    async def index_changes(self, file_paths: list[str], file_contents: dict[str, str]) -> dict:
+    async def index_changes(self, file_paths: list[str], file_contents: dict[str, str], project_root: str = "") -> dict:
         """
         Incremental update for changed files.
         1. Drop stale call graph data for each changed file.
         2. Re-parse and re-embed changed files only.
         """
+        # Snapshot existing summaries BEFORE deletion — nodes are removed in the loop below.
+        existing_summaries: dict[str, str] = {}
+        for fp in file_paths:
+            if file_contents.get(fp) is not None:
+                for node in await self._db.get_nodes_by_file(fp):
+                    if node["summary"]:
+                        existing_summaries[node["id"]] = node["summary"]
+
         updated_nodes = []
         updated_edges = []
         updated_chunks = []
@@ -86,17 +94,10 @@ class Indexer:
             if ext not in _SUPPORTED_EXTENSIONS:
                 continue
 
-            nodes, edges = _parser.parse_file(fp, content)
+            nodes, edges = _parser.parse_file(fp, content, project_root=project_root)
             updated_nodes.extend(nodes)
             updated_edges.extend(edges)
-            updated_chunks.extend(extract_chunks(fp, content))
-
-        # Read existing summaries BEFORE upsert_nodes zeroes the summary column.
-        existing_summaries: dict[str, str] = {}
-        if updated_chunks:
-            existing_summaries = await self._embeddings.get_summaries(
-                [c.id for c in updated_chunks]
-            )
+            updated_chunks.extend(extract_chunks(fp, content, project_root=project_root))
 
         if updated_nodes:
             await self._db.upsert_nodes(updated_nodes)
@@ -106,7 +107,10 @@ class Indexer:
             await self._db.upsert_edges(updated_edges, all_ids)
 
         if updated_chunks:
-            await self._embeddings.upsert_chunks(updated_chunks, existing_summaries=existing_summaries)
+            await self._embeddings.upsert_chunks(
+                updated_chunks,
+                existing_summaries=existing_summaries if existing_summaries else None,
+            )
 
         return {
             "status": "ok",
@@ -115,7 +119,7 @@ class Indexer:
         }
 
     async def reindex_call_graph_only(
-        self, file_paths: list[str], file_contents: dict[str, str]
+        self, file_paths: list[str], file_contents: dict[str, str], project_root: str = ""
     ) -> dict:
         """Re-parse call graph for the given files without touching embeddings."""
         updated_nodes = []
@@ -123,14 +127,13 @@ class Indexer:
 
         for fp in file_paths:
             content = file_contents.get(fp)
-            await self._embeddings.delete_by_file(fp)
             await self._db.delete_file_data(fp)
             if not content:
                 continue
             ext = Path(fp).suffix.lower()
             if ext not in _SUPPORTED_EXTENSIONS:
                 continue
-            nodes, edges = _parser.parse_file(fp, content)
+            nodes, edges = _parser.parse_file(fp, content, project_root=project_root)
             updated_nodes.extend(nodes)
             updated_edges.extend(edges)
 
@@ -152,6 +155,7 @@ class Indexer:
         file_paths: list[str],
         file_contents: dict[str, str],
         force_summaries: bool = False,
+        project_root: str = "",
     ) -> dict:
         """Re-embed functions for the given files without touching the call graph.
         Pass force_summaries=True to regenerate LLM summaries even for known functions."""
@@ -165,7 +169,7 @@ class Indexer:
             ext = Path(fp).suffix.lower()
             if ext not in _SUPPORTED_EXTENSIONS:
                 continue
-            updated_chunks.extend(extract_chunks(fp, content))
+            updated_chunks.extend(extract_chunks(fp, content, project_root=project_root))
 
         if updated_chunks:
             existing = {} if force_summaries else await self._embeddings.get_summaries(
