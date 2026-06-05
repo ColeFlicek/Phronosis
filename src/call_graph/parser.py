@@ -117,8 +117,9 @@ def _visit_python(
         qual_name = f"{parent_class}.{func_name_raw}" if parent_class else func_name_raw
         # Use <locals> convention to disambiguate nested functions with the same name
         # that appear inside different parent functions (e.g. two functions both containing def _helper).
+        # enclosing_func is the full func_id of the parent, so don't prepend module again.
         if enclosing_func:
-            func_id = f"{module}.{enclosing_func}.<locals>.{qual_name}"
+            func_id = f"{enclosing_func}.<locals>.{qual_name}"
         else:
             func_id = f"{module}.{qual_name}"
         func_text = _node_text(node, source)

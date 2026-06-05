@@ -167,10 +167,12 @@ class Indexer:
             updated_nodes.extend(nodes)
             updated_edges.extend(edges)
 
+        # Compute the set of re-parsed node IDs upfront — used in both blocks below.
+        new_node_ids = {n.id for n in updated_nodes}
+
         # Clean up embeddings for functions that no longer exist after the re-parse.
         # Must run even when updated_nodes is empty (all functions removed from a file).
         if existing_summaries:
-            new_node_ids = {n.id for n in updated_nodes}
             orphaned = [nid for nid in existing_summaries if nid not in new_node_ids]
             if orphaned:
                 await self._embeddings.delete_by_ids(orphaned)
