@@ -189,6 +189,32 @@ async def query_decisions(query_text: str) -> str:
     return json.dumps(results)
 
 
+# ── Query HTTP endpoints ──────────────────────────────────────────────────────
+
+@mcp.custom_route("/api/functions", methods=["POST"])
+async def http_get_functions_for_files(request: Request) -> JSONResponse:
+    """
+    POST /api/functions {"files": ["/abs/path/to/file.py", ...]}
+    Returns all function node IDs indexed for the given files.
+    Used by the post-commit hook to resolve file paths → function IDs before
+    writing the decision link, so get_decision_history works at function granularity.
+    """
+    try:
+        data = await request.json()
+        files: list[str] = data.get("files", [])
+        if not files:
+            return JSONResponse({"function_ids": []})
+        svcs = await _get_services()
+        db = svcs["db"]
+        ids: list[str] = []
+        for fp in files:
+            nodes = await db.get_nodes_by_file(fp)
+            ids.extend(n["id"] for n in nodes)
+        return JSONResponse({"function_ids": ids})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
 # ── Git hook HTTP endpoint ─────────────────────────────────────────────────────
 
 @mcp.custom_route("/index", methods=["POST"])
@@ -217,6 +243,38 @@ async def git_hook_index(request: Request) -> JSONResponse:
         svcs = await _get_services()
         result = await svcs["indexer"].index_changes(changed_files, file_contents, project_root=project_root)
         return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+# ── Decision HTTP endpoint ────────────────────────────────────────────────────
+
+@mcp.custom_route("/api/decisions", methods=["POST"])
+async def http_log_decision(request: Request) -> JSONResponse:
+    """
+    POST /api/decisions
+    Body: {"type": "Patch|Implementation|Design|Architectural",
+           "description": "...",
+           "rejected_alternatives": "...",
+           "trigger": "...",
+           "linked_function_ids": [...]}
+    Called by the post-commit git hook and backfill scripts.
+    Mirrors the log_decision MCP tool without requiring MCP transport.
+    """
+    try:
+        data = await request.json()
+        description = data.get("description", "")
+        if not description:
+            return JSONResponse({"status": "error", "detail": "description required"}, status_code=400)
+        svcs = await _get_services()
+        result = await svcs["decisions"].log_decision(
+            type=data.get("type", "Patch"),
+            description=description,
+            rejected_alternatives=data.get("rejected_alternatives", ""),
+            trigger=data.get("trigger", ""),
+            linked_function_ids=data.get("linked_function_ids") or None,
+        )
+        return JSONResponse({"status": "ok", **result})
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 
