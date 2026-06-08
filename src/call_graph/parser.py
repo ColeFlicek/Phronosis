@@ -76,7 +76,8 @@ def _parse_python(
 ) -> tuple[list[FunctionNode], list[CallEdge]]:
     nodes: list[FunctionNode] = []
     edges: list[CallEdge] = []
-    _visit_python(root, file_path, module, source, nodes, edges, parent_class=None, enclosing_func=None)
+    _visit_python(root, file_path, module, source, nodes, edges,
+                  parent_class=None, enclosing_func=None, enclosing_class=None)
     # Add import edges from top-level import statements
     _extract_python_imports(root, file_path, module, source, edges)
     return nodes, edges
@@ -91,14 +92,22 @@ def _visit_python(
     edges: list[CallEdge],
     parent_class: str | None,
     enclosing_func: str | None = None,
+    enclosing_class: str | None = None,
 ) -> None:
+    # enclosing_func: full ID of the innermost enclosing function (None at module scope)
+    # enclosing_class: full ID of the innermost enclosing class (None at module/function scope)
+    # parent_class: bare class name — truthy when directly inside a class body
     if node.type == "class_definition":
         class_name = _child_text(node, "identifier", source)
-        # Emit a class node
         if class_name:
-            # Scope the class_id when nested inside a function (same <locals> convention).
+            # Scope class_id to its full qualified location:
+            #   inside a function   → <enclosing_func>.<locals>.<class>
+            #   inside a class      → <enclosing_class>.<class>
+            #   at module scope     → <module>.<class>
             if enclosing_func:
                 class_id = f"{enclosing_func}.<locals>.{class_name}"
+            elif enclosing_class:
+                class_id = f"{enclosing_class}.{class_name}"
             else:
                 class_id = f"{module}.{class_name}"
             sig = _node_text(node, source).split("\n")[0].strip()
@@ -109,10 +118,14 @@ def _visit_python(
                     if base.type == "identifier":
                         edges.append(CallEdge(caller_id=class_id, callee_name=_text(base, source), edge_type="inherits", file=file_path))
             nodes.append(FunctionNode(id=class_id, name=class_name, file=file_path, module=module, type="class", signature=sig, body="", docstring=""))
-            # Recurse into class body: pass class_id as enclosing so methods get scoped IDs.
+            # Recurse into class body: class_id becomes the new enclosing_class.
+            # enclosing_func is preserved so nested functions/methods inside this class
+            # can still reference the correct function scope.
             for child in node.children:
                 _visit_python(child, file_path, module, source, nodes, edges,
-                              parent_class=class_name, enclosing_func=class_id if enclosing_func else None)
+                              parent_class=class_name,
+                              enclosing_func=enclosing_func,
+                              enclosing_class=class_id)
         return
 
     if node.type == "function_definition":
@@ -120,17 +133,19 @@ def _visit_python(
         if not func_name_raw:
             return
         qual_name = f"{parent_class}.{func_name_raw}" if parent_class else func_name_raw
-        # Use <locals> convention to disambiguate nested functions/methods.
-        # enclosing_func is the full func_id of the parent, so don't prepend module again.
-        if enclosing_func:
-            if parent_class:
-                # Method inside a class that's inside a function: enclosing_func IS the class scope.
-                func_id = f"{enclosing_func}.{func_name_raw}"
+        # Compute func_id based on the enclosing scope:
+        if parent_class:
+            # Class method: use enclosing_class for the full path (falls back to module.qual_name).
+            if enclosing_class:
+                func_id = f"{enclosing_class}.{func_name_raw}"
             else:
-                # Nested function inside a function.
-                func_id = f"{enclosing_func}.<locals>.{func_name_raw}"
+                func_id = f"{module}.{qual_name}"
+        elif enclosing_func:
+            # Nested function inside a function.
+            func_id = f"{enclosing_func}.<locals>.{func_name_raw}"
         else:
-            func_id = f"{module}.{qual_name}"
+            # Top-level function.
+            func_id = f"{module}.{func_name_raw}"
         func_text = _node_text(node, source)
         signature = func_text.split("\n")[0].strip()
         docstring = _extract_python_docstring(node, source)
@@ -144,18 +159,21 @@ def _visit_python(
 
         # Collect calls inside this function (not descending into nested defs)
         _collect_python_calls(node, func_id, file_path, source, edges)
-        # Recurse for nested defs, passing this function as the enclosing scope
+        # Recurse for nested defs: func_id becomes the new enclosing_func, class scope is reset.
         for child in node.children:
             if child.type == "block":
                 for stmt in child.children:
                     if stmt.type in ("function_definition", "class_definition"):
                         _visit_python(stmt, file_path, module, source, nodes, edges,
-                                      parent_class=parent_class, enclosing_func=func_id)
+                                      parent_class=parent_class,
+                                      enclosing_func=func_id,
+                                      enclosing_class=None)
         return
 
     for child in node.children:
         _visit_python(child, file_path, module, source, nodes, edges,
-                      parent_class=parent_class, enclosing_func=enclosing_func)
+                      parent_class=parent_class, enclosing_func=enclosing_func,
+                      enclosing_class=enclosing_class)
 
 
 def _collect_python_calls(

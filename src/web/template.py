@@ -338,7 +338,7 @@ HTML = r"""<!DOCTYPE html>
             <div class="layer-header">
               <div>
                 <div class="layer-name">embeddings</div>
-                <div class="layer-tech" id="emb-tech">neo4j · vector index</div>
+                <div class="layer-tech" id="emb-tech">sqlite-vec · vector index</div>
               </div>
               <div class="dot wait" id="dot-emb"></div>
             </div>
@@ -351,7 +351,7 @@ HTML = r"""<!DOCTYPE html>
             <div class="layer-header">
               <div>
                 <div class="layer-name">decision memory</div>
-                <div class="layer-tech">graphiti · neo4j</div>
+                <div class="layer-tech">sqlite-vec · sqlite</div>
               </div>
               <div class="dot wait" id="dot-dec"></div>
             </div>
@@ -543,7 +543,7 @@ HTML = r"""<!DOCTYPE html>
       setDot('dot-emb', emb.status === 'ok' ? 'ok' : 'error');
       document.getElementById('cnt-emb').textContent      = fmt(emb.functions);
       document.getElementById('emb-model-val').textContent = emb.model || '—';
-      document.getElementById('emb-tech').textContent      = `neo4j · ${emb.dim || '—'}d · ${emb.provider || '—'}`;
+      document.getElementById('emb-tech').textContent      = `sqlite-vec · ${emb.dim || '—'}d · ${emb.provider || '—'}`;
       document.getElementById('card-emb').className = 'card layer-card ' + (emb.status === 'ok' ? 'ok' : 'error');
 
       // Decisions

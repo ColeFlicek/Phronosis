@@ -5,6 +5,7 @@ and decision memory tools to Claude Code.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -23,20 +24,21 @@ from .web.routes import register_routes
 # ── Service container ──────────────────────────────────────────────────────────
 
 _services: dict[str, Any] = {}
+_services_lock = asyncio.Lock()
 
 
 async def _get_services() -> dict[str, Any]:
     if _services:
         return _services
-
-    sqlite_path = os.getenv("SQLITE_PATH", "/data/acip.db")
-
-    db = await CallGraphDB.create(sqlite_path)
-    embeddings = await EmbeddingStore.create(db)
-    decisions = await DecisionMemory.create(db, embeddings)
-    indexer = Indexer(db, embeddings)
-
-    _services.update(db=db, embeddings=embeddings, decisions=decisions, indexer=indexer)
+    async with _services_lock:
+        if _services:
+            return _services
+        sqlite_path = os.getenv("SQLITE_PATH", "/data/acip.db")
+        db = await CallGraphDB.create(sqlite_path)
+        embeddings = await EmbeddingStore.create(db)
+        decisions = await DecisionMemory.create(db, embeddings)
+        indexer = Indexer(db, embeddings)
+        _services.update(db=db, embeddings=embeddings, decisions=decisions, indexer=indexer)
     return _services
 
 
