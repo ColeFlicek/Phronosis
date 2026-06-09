@@ -17,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_graph.storage import CallGraphDB
+from .client_setup import generate_setup_script, _default_claude_home
 from .contracts.manager import ContractManager
 from .decision_memory.memory import DecisionMemory
 from .embeddings.embedder import EmbeddingStore
@@ -245,6 +246,81 @@ async def query_decisions(
         query_text, project_id=project_id or None
     )
     return json.dumps(results)
+
+
+# ── Client setup tool ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def setup_acip_client(
+    project_root: str,
+    project_id: str = "",
+    claude_home: str = "",
+    install_git_hook: bool = True,
+) -> str:
+    """
+    First-time setup for a new ACIP-integrated project. Call this once after
+    connecting to the MCP server. Execute the returned script with Bash to
+    complete setup — no other manual steps required.
+
+    Installs on the client machine:
+    - Pre-edit hook (~/.claude/hooks/acip-suggest.py): fires before every Edit,
+      warns when editing chokepoints or risk-surface functions, and nudges toward
+      ACIP tools on grep/Read.
+    - Claude Code settings.json: adds Bash/Read/Edit PreToolUse hook matchers.
+    - Project CLAUDE.md: three-tier workflow, pre-edit gate, multi-agent context.
+    - Memory files: behavioral guidance that persists across sessions.
+    - Post-commit git hook: re-indexes changed files + logs decisions on commit.
+
+    project_root: absolute path to the project directory on the client machine
+    project_id: slug for this project (default: derived from project_root basename)
+    claude_home: path to ~/.claude directory (default: ~/.claude)
+    install_git_hook: whether to install the post-commit git hook (default: true)
+
+    Usage:
+        result = setup_acip_client("/Users/name/myproject")
+        # Then run: exec(result["setup_script"])  or  Bash(result["run_command"])
+    """
+    if not project_root:
+        return json.dumps({"status": "error", "detail": "project_root is required"})
+
+    pid = project_id or _derive_project_id(project_root)
+    home = claude_home or _default_claude_home()
+    server_url = os.getenv("ACIP_URL", "http://localhost:3004")
+
+    # Load post-commit hook content from the scripts directory.
+    scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    post_commit_path = os.path.join(scripts_dir, "post-commit.sh")
+    try:
+        with open(post_commit_path) as f:
+            post_commit = f.read().replace(
+                'ACIP_URL="${ACIP_URL:-http://localhost:3004}"',
+                f'ACIP_URL="${{ACIP_URL:-{server_url}}}"',
+            )
+    except FileNotFoundError:
+        post_commit = f'#!/usr/bin/env bash\n# post-commit hook\nexport ACIP_URL="{server_url}"\n'
+        install_git_hook = False
+
+    script = generate_setup_script(
+        project_root=project_root,
+        acip_url=server_url,
+        project_id=pid,
+        claude_home=home,
+        install_git_hook=install_git_hook,
+        post_commit_content=post_commit,
+    )
+
+    return json.dumps({
+        "status": "ready",
+        "project_id": pid,
+        "acip_url": server_url,
+        "run_command": "python3 << 'ACIP_SETUP'\n" + script + "\nACIP_SETUP",
+        "setup_script": script,
+        "instructions": (
+            "Execute run_command with Bash to complete setup. "
+            "Then restart Claude Code to activate hooks. "
+            f"Then call index_project('{project_root}') to index the codebase."
+        ),
+    })
 
 
 # ── Project Home tool ────────────────────────────────────────────────────────
