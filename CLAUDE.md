@@ -30,11 +30,18 @@ Read(file, specific lines)   # only after you know exactly which function to mod
 File reads are for one purpose only: viewing the exact implementation of a function
 you are about to modify. They are not how you understand architecture.
 
-## Step 1 — Before modifying any specific function
+## Step 1 — Pre-edit gate (before every Edit on an existing function)
 
-1. `get_decision_history(function_name)` — understand why it exists in its current form
-2. `get_impact_radius(function_name, depth=2)` — know the blast radius before editing
-3. `query_similar_functions(snippet)` — check for parallel implementations
+1. `get_impact_radius(function_name, depth=2)` — what breaks if this changes?
+2. `get_decision_history(function_name)` — why was this designed this way?
+3. `query_similar_functions(what_you_are_about_to_write)` — what is the existing pattern?
+
+Check 3 is the **structural consistency check**: find what similar code looks like in this
+codebase before writing new code. Inconsistent patterns create maintenance debt and confuse
+future agents.
+
+In multi-agent contexts: `get_decision_history` also reveals whether a concurrent agent
+recently modified this function. Run it even on functions you wrote last session.
 
 ## Step 2 — After making edits
 
@@ -82,6 +89,23 @@ Replace `localhost` with your server's IP or hostname if running remotely.
 cp /path/to/ACIP/scripts/post-commit.sh .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 export ACIP_URL=http://localhost:3004
+```
+
+## Claude Code pre-edit hook (per machine, install once)
+
+Fires before every Edit call on source files. Silently passes if ACIP is unreachable.
+Prints specific warnings when editing chokepoints or risk-surface functions.
+
+```bash
+cp /path/to/ACIP/scripts/acip-pre-edit-hook.py ~/.claude/hooks/acip-suggest.py
+```
+
+Add to `~/.claude/settings.json` under `hooks.PreToolUse`:
+```json
+{
+  "matcher": "Edit",
+  "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/acip-suggest.py" }]
+}
 ```
 
 # RTK
