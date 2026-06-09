@@ -1,0 +1,90 @@
+# ACIP Roadmap
+
+> **Vision:** ACIP becomes the organizational substrate for a software development organization that runs without a standing engineering team. Humans define goals, constraints, and priorities. Agents handle implementation. ACIP is the shared nervous system — memory, coordination, governance, and project management in one queryable layer.
+
+---
+
+## Active — implement next
+
+### Invariant Contracts
+Architectural rules encoded as live, enforceable constraints. Think of it as git hooks but for high-level design decisions.
+
+A constraint is a rule like "module X never directly calls module Y" or "all external API calls must pass through the rate limiter." Stored in a `constraints` table, validated against the call graph on every commit. If an agent violates one, it self-corrects before deployment. If a human violates one, the hook warns them immediately.
+
+The embedding layer finds semantically similar constraints to warn about near-misses — not just exact violations but patterns that rhyme with known-bad designs.
+
+**New surface area:**
+- `constraints` table: `(id, project_id, description, rule_type, expression, linked_function_ids, created_at)`
+- `add_constraint()` MCP tool
+- `check_constraints(project_id)` — validates current call graph, returns violations
+- `list_violations(project_id)` — standing violation log
+- Post-commit hook integration: auto-runs check, blocks or warns on violations
+
+---
+
+### Project Management Interface
+ACIP as the issue tracker — but one that knows about the codebase.
+
+Issues aren't stored in Jira or a doc disconnected from code. They live in ACIP, linked to specific function IDs. A bug report automatically knows which functions are on its blast radius. A feature request is linked to the call graph nodes that need to change. "What's the backlog for the auth module?" is a semantic query, not a manual filter.
+
+This is the interface for the ideas-to-implementation loop. To-dos, hotfixes, feature ideas, and architectural debt all live here, queryable by the agent before it starts work.
+
+**New surface area:**
+- `issues` table: `(id, project_id, type, title, description, status, priority, created_at, resolved_at, resolved_by_commit)`
+- `issue_functions` join table: issue ↔ function_id many-to-many
+- `issue_embeddings` vec0 table: semantic issue search
+- `create_issue()`, `list_issues()`, `get_issues_for_function()`, `resolve_issue()` MCP tools
+- Web UI: issues panel with backlog view and per-function issue list
+- Auto-linking: when creating an issue, semantic search suggests relevant functions
+
+---
+
+## Back burner — design needed before building
+
+### Risk-Gated Deployment
+Replace binary CI pass/fail with a semantic risk score for each deployment.
+
+Inputs: impact radius of changed functions, semantic similarity to prior incidents (from decision history), invariant contract violations, intent-structure gap score. Below a threshold: auto-deploy. Above: surface to human with a plain-language explanation of exactly what's risky and why.
+
+Human attention becomes a finite resource allocated by evidence, not spent uniformly on every deploy. Requires structural change to the deployment pipeline and a concept of "incidents" in the data model. **Dependency: Invariant Contracts.**
+
+---
+
+### Multi-Agent Coordination
+ACIP as shared semantic state for multiple concurrent agents on the same codebase.
+
+When agent A changes an API contract, it doesn't send a message to agent B — it updates ACIP. Agent B, before implementing anything that touches that contract, queries ACIP and discovers the change. Coordination through semantic state, not message passing. Requires multi-agent runtime infrastructure and a subscription/notification model on function-level changes.
+
+---
+
+## Ideas to explore — not yet prioritized
+
+### Temporal Semantic Graph
+Track the history of semantic meanings over time. When a function's embedding crosses a distance threshold from its prior state, that's a semantic drift event — the function's *purpose* changed. Semantically stable functions are safe anchor points; semantically volatile ones are risk vectors. Pairs with runtime usage metrics.
+
+### Runtime Usage + Observability Feedback Loop
+Instrument production or test runs to capture behavioral data: which functions actually execute, how often, in what sequences. Pair high-frequency functions with higher stability requirements and development priority. Close the incident-to-fix loop: anomalous runtime path → semantic search → prior incident decision history → fix pattern → deploy.
+
+### Intent-Structure Gap Detector
+Compare the semantic embedding of a function's decision history (what it was designed to do) against the embedding of its implementation (what it actually does). High divergence = implementation drifted from stated intent. Surface as a standing query: "show all functions where the code no longer matches the design."
+
+### Cross-Language Isomorphism
+Detect functions doing the same thing across Python and TypeScript projects. Embeddings are language-agnostic, so this works today — the missing piece is a standing isomorphism map that monitors when semantically paired functions diverge.
+
+### Semantic Test Coverage
+Measure whether tests cover the *behaviors* functions implement, not just the lines. Embed test functions alongside production functions. High line coverage + large semantic distance between test and function = undertested behavior, not just uncovered lines.
+
+---
+
+## Implemented
+
+| Feature | Date | Notes |
+|---|---|---|
+| Three-layer architecture (call graph, embeddings, decisions) | initial | |
+| Function-level hash diffing for incremental re-index | 2026-06-08 | Only changed functions re-embed |
+| Multi-project support with project_id namespace | 2026-06-08 | Schema migration at startup |
+| Per-project vec0 tables | 2026-06-09 | True isolation, no cross-project KNN noise |
+| Parallel LLM summarization | 2026-06-09 | asyncio.gather + Semaphore(10) |
+| Similarity score normalization | 2026-06-09 | L2 → [0,1] match percentage |
+| Web UI project selector + search panel | 2026-06-09 | |
+| `/acip-import` slash command | 2026-06-08 | Three-step onboarding in one command |
