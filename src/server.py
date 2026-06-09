@@ -433,6 +433,109 @@ async def check_contracts(project_id: str) -> str:
 # See: http_delete_contract below.
 
 
+# ── Agent Improvement Tools ───────────────────────────────────────────────────
+
+@mcp.tool()
+async def file_improvement(
+    title: str,
+    description: str,
+    severity: str = "medium",
+    project_id: str = "",
+    affected_functions: list[str] | None = None,
+    suggested_fix: str = "",
+    reproduction_steps: str = "",
+) -> str:
+    """
+    File a structured improvement report for ACIP so another agent session can
+    implement it. Use this when you observe a bug, limitation, or enhancement
+    opportunity during a session that you cannot or should not fix yourself.
+
+    Write reports as if briefing a competent engineer who will pick this up cold:
+    - title: one line, imperative ("Fix X", "Add Y", "Improve Z performance")
+    - description: what is wrong or missing, why it matters, any relevant context
+      you have (call paths observed, data shapes, error messages). Be specific —
+      vague descriptions slow implementation.
+    - severity: "low" | "medium" | "high" | "critical"
+    - project_id: the ACIP project_id this applies to (empty = ACIP itself)
+    - affected_functions: list of fully-qualified function IDs from the call graph
+      (e.g. ["src.contracts.manager.ContractManager.check_project"]). Use
+      query_similar_functions() first to find exact IDs.
+    - suggested_fix: your best hypothesis for HOW to fix it. Even a rough sketch
+      helps. Include rejected alternatives if you considered them.
+    - reproduction_steps: exact steps or query that triggers the issue.
+
+    Returns the improvement ID — save it if you need to reference this report later.
+    """
+    import uuid
+    svcs = await _get_services()
+    improvement_id = str(uuid.uuid4())
+    result = await svcs["db"].create_improvement(
+        improvement_id=improvement_id,
+        project_id=project_id,
+        title=title,
+        description=description,
+        affected_functions=affected_functions or [],
+        severity=severity,
+        suggested_fix=suggested_fix,
+        reproduction_steps=reproduction_steps,
+    )
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def list_improvements(
+    project_id: str = "",
+    status: str = "open",
+) -> str:
+    """
+    List agent-filed improvement reports.
+
+    Call this at session start on any ACIP project to see what prior agent
+    sessions flagged as needing work. Improvements are ordered newest-first.
+
+    project_id: filter to a specific project (empty = all projects)
+    status: "open" | "done" | "wont_fix" | "" (empty = all statuses)
+
+    Each result includes: id, title, description, severity, affected_functions,
+    suggested_fix, reproduction_steps, filed_at.
+    """
+    svcs = await _get_services()
+    result = await svcs["db"].list_improvements(
+        project_id=project_id or None,
+        status=status or None,
+    )
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def resolve_improvement(
+    improvement_id: str,
+    resolution_notes: str,
+    status: str = "done",
+) -> str:
+    """
+    Mark an agent improvement report as resolved.
+
+    Call this after implementing (or deciding not to implement) a filed improvement.
+    Write resolution_notes that tell the next agent what was done:
+    - Which files were modified
+    - What the root cause turned out to be
+    - Any trade-offs made during implementation
+    - Why 'wont_fix' if that is the chosen status
+
+    improvement_id: the ID returned by file_improvement()
+    resolution_notes: what was done and why
+    status: "done" | "wont_fix" (default: "done")
+    """
+    svcs = await _get_services()
+    result = await svcs["db"].resolve_improvement(
+        improvement_id=improvement_id,
+        resolution_notes=resolution_notes,
+        status=status,
+    )
+    return json.dumps(result)
+
+
 # ── Query HTTP endpoints ──────────────────────────────────────────────────────
 
 @mcp.custom_route("/api/functions", methods=["POST"])

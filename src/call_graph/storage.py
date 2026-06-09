@@ -107,6 +107,24 @@ CREATE TABLE IF NOT EXISTS contract_violations (
 CREATE INDEX IF NOT EXISTS idx_cviol_contract   ON contract_violations(contract_id);
 CREATE INDEX IF NOT EXISTS idx_cviol_project    ON contract_violations(project_id);
 CREATE INDEX IF NOT EXISTS idx_cviol_function   ON contract_violations(function_id);
+
+CREATE TABLE IF NOT EXISTS agent_improvements (
+    id                 TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL DEFAULT '',
+    title              TEXT NOT NULL,
+    description        TEXT NOT NULL,
+    affected_functions TEXT NOT NULL DEFAULT '[]',
+    severity           TEXT NOT NULL DEFAULT 'medium',
+    suggested_fix      TEXT NOT NULL DEFAULT '',
+    reproduction_steps TEXT NOT NULL DEFAULT '',
+    status             TEXT NOT NULL DEFAULT 'open',
+    filed_at           TEXT NOT NULL,
+    resolved_at        TEXT,
+    resolution_notes   TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_impr_project ON agent_improvements(project_id);
+CREATE INDEX IF NOT EXISTS idx_impr_status  ON agent_improvements(status);
 """
 
 
@@ -669,6 +687,85 @@ class CallGraphDB:
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
+    # ── Agent Improvements ─────────────────────────────────────────────────
+
+    async def create_improvement(
+        self,
+        improvement_id: str,
+        project_id: str,
+        title: str,
+        description: str,
+        affected_functions: list[str],
+        severity: str,
+        suggested_fix: str,
+        reproduction_steps: str,
+    ) -> dict:
+        import json
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO agent_improvements
+               (id, project_id, title, description, affected_functions,
+                severity, suggested_fix, reproduction_steps, status, filed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+            (
+                improvement_id, project_id, title, description,
+                json.dumps(affected_functions), severity,
+                suggested_fix, reproduction_steps, now,
+            ),
+        )
+        await self._db.commit()
+        return await self.get_improvement(improvement_id)
+
+    async def get_improvement(self, improvement_id: str) -> dict | None:
+        import json
+        async with self._db.execute(
+            "SELECT * FROM agent_improvements WHERE id = ?", (improvement_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        r = dict(row)
+        r["affected_functions"] = json.loads(r["affected_functions"])
+        return r
+
+    async def list_improvements(
+        self,
+        project_id: str | None = None,
+        status: str | None = "open",
+    ) -> list[dict]:
+        import json
+        clauses, params = [], []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        async with self._db.execute(
+            f"SELECT * FROM agent_improvements {where} ORDER BY filed_at DESC",
+            params,
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        for r in rows:
+            r["affected_functions"] = json.loads(r["affected_functions"])
+        return rows
+
+    async def resolve_improvement(
+        self,
+        improvement_id: str,
+        resolution_notes: str,
+        status: str = "done",
+    ) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """UPDATE agent_improvements
+               SET status = ?, resolved_at = ?, resolution_notes = ?
+               WHERE id = ?""",
+            (status, now, resolution_notes, improvement_id),
+        )
+        await self._db.commit()
+        return await self.get_improvement(improvement_id)
 
     # ── Project Home ───────────────────────────────────────────────────────
 
