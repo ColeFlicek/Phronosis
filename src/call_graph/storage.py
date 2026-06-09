@@ -912,6 +912,10 @@ class CallGraphDB:
         entry_points = entry_points[:20]
 
         # ── Risk surface: high churn AND high callers ─────────────────────
+        # Primary signal: functions with many decisions (churn) AND many callers.
+        # Fallback: when no decisions are logged yet, use pure structural signal
+        # (high caller_count among project nodes) so the field is never an
+        # ambiguous empty list. risk_detection_mode tells the caller which applies.
         risk_surface = [
             {
                 "id": fid,
@@ -923,6 +927,24 @@ class CallGraphDB:
         ]
         risk_surface.sort(key=lambda x: -(x["churn"] * x["caller_count"]))
         risk_surface = risk_surface[:5]
+
+        if risk_surface:
+            risk_detection_mode = "churn_and_callers"
+        else:
+            # No churn data yet — fall back to structural heuristic.
+            structural = sorted(
+                [
+                    {"id": n["id"], "churn": 0, "caller_count": caller_counts.get(n["id"], 0)}
+                    for n in all_nodes
+                    if n["type"] not in ("class", "ClassDef")
+                    and caller_counts.get(n["id"], 0) >= 2
+                ],
+                key=lambda x: -x["caller_count"],
+            )[:5]
+            risk_surface = structural
+            risk_detection_mode = (
+                "structural_heuristic_no_decisions" if structural else "insufficient_data"
+            )
 
         # ── Churn hotspots: top 5 most-patched ───────────────────────────
         churn_hotspots = sorted(
@@ -982,6 +1004,7 @@ class CallGraphDB:
                 "active_contract_count": len(active_contracts),
                 "active_contracts": [{"id": c["id"], "title": c["title"]} for c in active_contracts],
                 "recent_violation_count": recent_violation_count,
+                "risk_detection_mode": risk_detection_mode,
             },
             "recent_decisions": recent_decisions,
         }
