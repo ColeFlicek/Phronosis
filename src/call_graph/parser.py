@@ -30,6 +30,7 @@ class FunctionNode:
     body: str         # truncated at 2000 chars for storage
     docstring: str
     body_hash: str = ""  # sha256[:16] of full function text — used to skip re-embedding unchanged functions
+    decorators: list = field(default_factory=list)  # decorator call names, e.g. ["router.get", "login_required"]
 
 
 @dataclass
@@ -85,6 +86,26 @@ def _parse_python(
     return nodes, edges
 
 
+def _extract_decorator_name(dec_node: "Node", source: bytes) -> str:
+    """Return the callable name from a decorator node, without arguments.
+
+    @router.get("/path")  →  "router.get"
+    @login_required       →  "login_required"
+    @app.route("/", methods=["GET"])  →  "app.route"
+    """
+    for child in dec_node.children:
+        if child.type in ("identifier", "attribute"):
+            return _text(child, source)
+        if child.type == "call":
+            func_part = next(
+                (c for c in child.children if c.type in ("identifier", "attribute")),
+                None,
+            )
+            if func_part:
+                return _text(func_part, source)
+    return ""
+
+
 def _visit_python(
     node: "Node",
     file_path: str,
@@ -95,10 +116,33 @@ def _visit_python(
     parent_class: str | None,
     enclosing_func: str | None = None,
     enclosing_class: str | None = None,
+    _decorators: list | None = None,
 ) -> None:
     # enclosing_func: full ID of the innermost enclosing function (None at module scope)
     # enclosing_class: full ID of the innermost enclosing class (None at module/function scope)
     # parent_class: bare class name — truthy when directly inside a class body
+    # _decorators: propagated from a parent decorated_definition node
+
+    if node.type == "decorated_definition":
+        # Collect all @decorator names, then recurse into the inner definition
+        # with those names attached — so function/class nodes get their decorators.
+        decs: list[str] = []
+        inner = None
+        for child in node.children:
+            if child.type == "decorator":
+                name = _extract_decorator_name(child, source)
+                if name:
+                    decs.append(name)
+            elif child.type in ("function_definition", "class_definition"):
+                inner = child
+        if inner:
+            _visit_python(inner, file_path, module, source, nodes, edges,
+                          parent_class=parent_class,
+                          enclosing_func=enclosing_func,
+                          enclosing_class=enclosing_class,
+                          _decorators=decs)
+        return
+
     if node.type == "class_definition":
         class_name = _child_text(node, "identifier", source)
         if class_name:
@@ -158,6 +202,7 @@ def _visit_python(
             type="method" if parent_class else "function",
             signature=signature, body=func_text[:2000], docstring=docstring,
             body_hash=body_hash,
+            decorators=_decorators or [],
         ))
 
         # Collect calls inside this function (not descending into nested defs)

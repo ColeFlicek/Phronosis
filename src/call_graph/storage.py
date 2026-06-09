@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     docstring   TEXT NOT NULL DEFAULT '',
     summary     TEXT NOT NULL DEFAULT '',
     body_hash   TEXT NOT NULL DEFAULT '',
+    decorators  TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (project_id, id)
 );
 
@@ -154,6 +155,11 @@ class CallGraphDB:
             cols = {row[1] for row in await cur.fetchall()}
         if "project_id" not in cols:
             await self._migrate_to_multi_project()
+        if "decorators" not in cols:
+            await self._db.execute(
+                "ALTER TABLE nodes ADD COLUMN decorators TEXT NOT NULL DEFAULT '[]'"
+            )
+            await self._db.commit()
 
     async def _ensure_indexes(self) -> None:
         """Idempotent creation of project_id-dependent indexes. Safe after migration."""
@@ -286,18 +292,20 @@ class CallGraphDB:
     # ── Nodes ──────────────────────────────────────────────────────────────
 
     async def upsert_nodes(self, nodes: list[FunctionNode], project_id: str) -> None:
+        import json
         rows = [
             (project_id, n.id, n.file, n.module, n.type, n.name,
-             n.signature, n.docstring, n.body_hash)
+             n.signature, n.docstring, n.body_hash, json.dumps(n.decorators))
             for n in nodes
         ]
         await self._db.executemany(
-            """INSERT INTO nodes(project_id,id,file,module,type,name,signature,docstring,summary,body_hash)
-               VALUES(?,?,?,?,?,?,?,?,'',?)
+            """INSERT INTO nodes(project_id,id,file,module,type,name,signature,docstring,summary,body_hash,decorators)
+               VALUES(?,?,?,?,?,?,?,?,'',?,?)
                ON CONFLICT(project_id,id) DO UPDATE SET
                    file=excluded.file, module=excluded.module, type=excluded.type,
                    name=excluded.name, signature=excluded.signature,
-                   docstring=excluded.docstring, body_hash=excluded.body_hash""",
+                   docstring=excluded.docstring, body_hash=excluded.body_hash,
+                   decorators=excluded.decorators""",
             rows,
         )
         await self._db.commit()
@@ -873,12 +881,35 @@ class CallGraphDB:
         )[:5]
 
         # ── Entry points: nodes with no callers ───────────────────────────
+        # Two kinds: static (nothing calls them) and http (framework-decorated
+        # route handlers that are invoked at runtime, not via static calls).
+        _HTTP_DEC_PATTERNS = (
+            "router.get", "router.post", "router.put", "router.patch",
+            "router.delete", "router.api_route", "router.head", "router.options",
+            "app.get", "app.post", "app.put", "app.patch", "app.delete",
+            "app.route", "app.api_route",
+            "blueprint.route", "bp.route",
+        )
         callee_ids = {r[1] for r in all_edges}
-        entry_points = [
-            {"id": n["id"], "name": n["name"]}
-            for n in all_nodes
-            if n["id"] not in callee_ids and n["type"] not in ("class", "ClassDef")
-        ][:8]
+        entry_points = []
+        for n in all_nodes:
+            if n["type"] in ("class", "ClassDef"):
+                continue
+            decs = json.loads(n.get("decorators") or "[]")
+            http_kind = next(
+                (True for d in decs if any(p in d for p in _HTTP_DEC_PATTERNS)),
+                False,
+            )
+            if n["id"] not in callee_ids or http_kind:
+                entry_points.append({
+                    "id": n["id"],
+                    "name": n["name"],
+                    "kind": "http" if http_kind else "static",
+                    "decorators": decs,
+                })
+        # HTTP routes first, then static; cap at 20 total (more useful than 8)
+        entry_points.sort(key=lambda x: (0 if x["kind"] == "http" else 1, x["id"]))
+        entry_points = entry_points[:20]
 
         # ── Risk surface: high churn AND high callers ─────────────────────
         risk_surface = [
