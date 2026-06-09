@@ -277,27 +277,11 @@ async def create_contract(
     return json.dumps(result)
 
 
-@mcp.tool()
-async def update_contract_examples(
-    contract_id: str,
-    violation_examples: list[str],
-    compliance_examples: list[str],
-) -> str:
-    """
-    Replace the violation and compliance code examples on a contract.
-
-    Use this before approving to edit AI-generated examples, add more,
-    or remove incorrect ones. If the contract is already active, the
-    embeddings are re-generated immediately.
-
-    violation_examples: code snippets that BREAK the rule
-    compliance_examples: code snippets that CORRECTLY FOLLOW the rule
-    """
-    svcs = await _get_services()
-    result = await svcs["contracts"].update_examples(
-        contract_id, violation_examples, compliance_examples
-    )
-    return json.dumps(result)
+# update_contract_examples is intentionally NOT exposed as an MCP tool.
+# Modifying violation/compliance examples on an active contract is a bypass
+# vector — an agent could weaken examples so its own code no longer matches.
+# This operation is available only through the web UI (human control plane).
+# See: http_update_contract below.
 
 
 @mcp.tool()
@@ -340,14 +324,11 @@ async def check_contracts(project_id: str) -> str:
     return json.dumps(result)
 
 
-@mcp.tool()
-async def delete_contract(contract_id: str) -> str:
-    """
-    Delete a contract and its embeddings.
-    """
-    svcs = await _get_services()
-    await svcs["contracts"].delete(contract_id)
-    return json.dumps({"status": "deleted", "contract_id": contract_id})
+# delete_contract is intentionally NOT exposed as an MCP tool.
+# An agent could delete a contract to bypass enforcement — this is the
+# primary adversarial failure vector for the contracts system.
+# Deletion is available only through the web UI (human control plane).
+# See: http_delete_contract below.
 
 
 # ── Query HTTP endpoints ──────────────────────────────────────────────────────
