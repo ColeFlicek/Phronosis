@@ -96,6 +96,84 @@ except Exception: pass
 sys.exit(0)
 '''
 
+# ── Template: Claude Code post-edit hook ─────────────────────────────────────
+# Installed to ~/.claude/hooks/acip-post-edit.py
+_POST_EDIT_HOOK = r'''#!/usr/bin/env python3
+"""ACIP PostToolUse hook — auto-indexes edited files and warns on template staleness."""
+import json, os, re, subprocess, sys, urllib.request
+
+ACIP_URL = os.environ.get("ACIP_URL", "{acip_url}")
+TIMEOUT  = 3
+
+TEMPLATE_SOURCES = {
+    "scripts/acip-pre-edit-hook.py":  "_HOOK_SCRIPT in client_setup.py",
+    "scripts/post-commit.sh":         "post-commit template (verify structure unchanged)",
+    "CLAUDE.md":                      "_CLIENT_CLAUDE_MD template in client_setup.py",
+}
+
+def _project_id():
+    pid = os.environ.get("ACIP_PROJECT", "")
+    if pid: return pid
+    try:
+        remote = subprocess.check_output(["git","remote","get-url","origin"],
+            stderr=subprocess.DEVNULL,timeout=2).decode().strip()
+        return re.sub(r"\.git$","",remote).split("/")[-1].split(":")[-1]
+    except Exception: pass
+    try:
+        root = subprocess.check_output(["git","rev-parse","--show-toplevel"],
+            stderr=subprocess.DEVNULL,timeout=2).decode().strip()
+        return os.path.basename(root)
+    except Exception: return ""
+
+def _project_root():
+    try:
+        return subprocess.check_output(["git","rev-parse","--show-toplevel"],
+            stderr=subprocess.DEVNULL,timeout=2).decode().strip()
+    except Exception: return ""
+
+def _bg_index(file_path, root, pid):
+    try: content = open(file_path, encoding="utf-8", errors="replace").read()
+    except Exception: return
+    cmd = f"""
+import json,urllib.request
+payload=json.dumps({{"project_root":{repr(root)},"project_id":{repr(pid)},"files":{{{repr(file_path)}:open({repr(file_path)},encoding="utf-8",errors="replace").read()}}}}).encode()
+req=urllib.request.Request({repr(ACIP_URL+"/api/index-bulk")},data=payload,headers={{"Content-Type":"application/json"}},method="POST")
+try:
+    with urllib.request.urlopen(req,timeout=60) as r:
+        d=json.loads(r.read())
+    import os
+    print(f"[ACIP] indexed {os.path.basename({repr(file_path)})}: {{d.get('functions_updated',0)}} fns updated")
+except Exception as e:
+    print(f"[ACIP] index failed: {{e}}")
+"""
+    subprocess.Popen(["python3","-c",cmd],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+try:
+    data = json.loads(sys.stdin.read())
+    tool = data.get("tool_name","")
+    inp  = data.get("tool_input",{})
+    if tool != "Edit": sys.exit(0)
+    path = inp.get("file_path","")
+    if not path: sys.exit(0)
+
+    if re.search(r"\.(py|ts|tsx)$", path):
+        pid  = _project_id()
+        root = _project_root()
+        if pid and root:
+            _bg_index(path, root, pid)
+            rel = path.replace(root+"/","") if root else path
+            print(f"[ACIP] Indexing {rel} in background...")
+
+    for suffix, warning in TEMPLATE_SOURCES.items():
+        if path.endswith(suffix):
+            print(f"[ACIP] Template source edited: {suffix}")
+            print(f"  → Review {warning}")
+            print(f"  → Update the embedded constant so setup_acip_client() distributes the latest version.")
+            break
+except Exception: pass
+sys.exit(0)
+'''
+
 # ── Template: project CLAUDE.md ───────────────────────────────────────────────
 # Written to <project_root>/CLAUDE.md (appended if file exists)
 _CLIENT_CLAUDE_MD = """\
@@ -195,29 +273,24 @@ def generate_setup_script(
     to work with ACIP. The caller executes this script via Bash.
     """
     hook_content = _HOOK_SCRIPT.replace("{acip_url}", acip_url)
+    post_edit_content = _POST_EDIT_HOOK.replace("{acip_url}", acip_url)
     claude_md = _CLIENT_CLAUDE_MD.replace("{acip_url}", acip_url).replace("{project_id}", project_id)
     mem_feedback = _MEMORY_FEEDBACK.replace("{project_id}", project_id)
 
-    # Memory dir path: ~/.claude/projects/<project-root-with-slashes-as-dashes>/memory
     mem_path_key = project_root.replace("/", "-").lstrip("-")
 
-    settings_hook_entry = {
-        "matcher": "Edit",
-        "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-suggest.py"}]
-    }
-    bash_hook_entry = {
-        "matcher": "Bash",
-        "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-suggest.py"}]
-    }
-    read_hook_entry = {
-        "matcher": "Read",
-        "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-suggest.py"}]
-    }
+    pre_hook_entries = [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-suggest.py"}]},
+        {"matcher": "Read", "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-suggest.py"}]},
+        {"matcher": "Edit", "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-suggest.py"}]},
+    ]
+    post_hook_entries = [
+        {"matcher": "Edit", "hooks": [{"type": "command", "command": f"python3 {claude_home}/hooks/acip-post-edit.py"}]},
+    ]
 
     import json as _json
-    settings_entries = _json.dumps(
-        [bash_hook_entry, read_hook_entry, settings_hook_entry], indent=4
-    )
+    pre_entries_json  = _json.dumps(pre_hook_entries,  indent=4)
+    post_entries_json = _json.dumps(post_hook_entries, indent=4)
 
     git_hook_block = ""
     if install_git_hook:
@@ -246,24 +319,37 @@ MEM_KEY      = "{mem_path_key}"
 
 results = []
 
-# ── Pre-edit hook ──────────────────────────────────────────────────
+# ── Pre-edit and post-edit hooks ──────────────────────────────────
 hooks_dir = pathlib.Path(CLAUDE_HOME) / "hooks"
 hooks_dir.mkdir(parents=True, exist_ok=True)
-hook_path = hooks_dir / "acip-suggest.py"
-hook_path.write_text({repr(hook_content)})
-hook_path.chmod(hook_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-results.append(f"  hook         {{hook_path}}")
+for fname, content in [("acip-suggest.py", {repr(hook_content)}),
+                        ("acip-post-edit.py", {repr(post_edit_content)})]:
+    p = hooks_dir / fname
+    p.write_text(content)
+    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+results.append(f"  hooks        {{hooks_dir}}/acip-suggest.py + acip-post-edit.py")
 
-# ── settings.json — merge hook entries ────────────────────────────
+# ── settings.json — merge PreToolUse and PostToolUse entries ──────
 settings_path = pathlib.Path(CLAUDE_HOME) / "settings.json"
 settings = json.loads(settings_path.read_text()) if settings_path.exists() else {{}}
-new_hooks = {settings_entries}
 
-existing_hooks = settings.setdefault("hooks", {{}}).setdefault("PreToolUse", [])
-existing_matchers = {{h["matcher"] for h in existing_hooks}}
-for entry in new_hooks:
-    if entry["matcher"] not in existing_matchers:
-        existing_hooks.append(entry)
+pre_entries  = {pre_entries_json}
+post_entries = {post_entries_json}
+
+hooks_cfg = settings.setdefault("hooks", {{}})
+
+pre_list  = hooks_cfg.setdefault("PreToolUse",  [])
+pre_matchers = {{h["matcher"] for h in pre_list}}
+for entry in pre_entries:
+    if entry["matcher"] not in pre_matchers:
+        pre_list.append(entry)
+
+post_list = hooks_cfg.setdefault("PostToolUse", [])
+post_matchers = {{h["matcher"] for h in post_list}}
+for entry in post_entries:
+    if entry["matcher"] not in post_matchers:
+        post_list.append(entry)
+
 settings_path.write_text(json.dumps(settings, indent=2))
 results.append(f"  settings     {{settings_path}}")
 
