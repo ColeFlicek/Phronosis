@@ -2,19 +2,38 @@
 
 AI Code Intelligence Platform provides structured, queryable knowledge of a codebase via call graph, semantic embeddings, and decision memory. Follow this workflow in every session.
 
-## Before touching any function
+## Step 0 — Session start: build the map before anything else
+
+On every session working on an ACIP-indexed project, run a comprehension pass **before reading
+any files or forming an implementation plan**. ACIP queries are more information-dense than file
+reads for architectural understanding: one semantic query surfaces the 10 most relevant functions
+across the entire codebase; one `get_impact_radius` call returns the full dependency tree;
+`get_decision_history` returns context that does not exist in source files at all.
+
+```
+list_projects()                                          # confirm what's indexed
+query_similar_functions("<task domain>", top_k=10)       # map the relevant subsystem
+get_callees("<central class or entry point>")            # understand the main flows
+get_impact_radius("<function you plan to touch>", depth=2)
+get_decision_history("<function you plan to touch>")
+```
+
+File reads are for one purpose only: viewing the exact implementation of a function you are
+about to modify. They are not how you understand architecture.
+
+## Step 1 — Before modifying any specific function
 
 1. `get_decision_history(function_name)` — understand why it exists in its current form
 2. `get_impact_radius(function_name, depth=2)` — know the blast radius before editing
-3. `query_similar_functions(snippet)` — check for parallel implementations or related patterns
+3. `query_similar_functions(snippet)` — check for parallel implementations
 
-## After making edits
+## Step 2 — After making edits
 
 4. `index_changes([modified_files], {file_path: content})` — keep the index fresh within this session
 
 Pass the actual file contents as a dict: `{"path/to/file.py": "<full content>"}`.
 
-## At session end
+## Step 3 — At session end
 
 5. Call `log_decision()` with a summary of any significant decisions made this session.
 
