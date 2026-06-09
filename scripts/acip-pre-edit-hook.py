@@ -4,23 +4,34 @@ PreToolUse hook — ACIP workflow enforcement.
 
 Fires on: Bash (grep), Read (source files), Edit (source files)
 
-Bash/Read: nudge toward ACIP tools instead of file exploration.
-Edit: check project home for risk signals on the file being edited.
-      If the file contains chokepoints or risk-surface functions,
-      print a specific warning and the three pre-edit checks to run.
-      Silent if no risk signals — only loud when it matters.
+Bash:  nudge toward ACIP tools instead of grep-based exploration.
+Read:  gate — blocks the first read of a session, calls ACIP itself,
+       prints the architectural summary, then defers ("review the above
+       then retry"). Gate valid for 30 min; subsequent reads pass silently.
+Edit:  hard risk-signal check — warns on chokepoints and risk-surface
+       functions with the three pre-edit ACIP calls to run first.
 
-Always exits 0 (non-blocking). Never fails a tool call.
+Gate strategy:
+  - First Read of a session on a source file → hook fetches project_home,
+    prints it, writes ~/.claude/acip_gates/{project_id}, exits 2 (blocks).
+  - Retry Read in same session → gate exists, exits 0 (allows).
+  - Gate expires after GATE_TTL seconds → next Read re-fetches and re-gates.
+  - ACIP unreachable → silent pass (never block when the server is down).
 """
 import json
 import os
 import re
 import sys
+import time
 import urllib.request
 
 ACIP_URL = os.environ.get("ACIP_URL", "http://100.71.88.106:3004")
-TIMEOUT = 3  # seconds — fast fail, never slow down the agent
+TIMEOUT = 3
+GATE_TTL = 1800  # 30 minutes
+_GATE_DIR = os.path.expanduser("~/.claude/acip_gates")
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _project_id() -> str:
     """Resolve project ID from env, git remote, or repo dirname."""
@@ -61,23 +72,51 @@ def _get_project_home(project_id: str) -> dict:
 def _file_to_module(file_path: str) -> str:
     """Convert src/call_graph/storage.py -> src.call_graph.storage"""
     p = file_path
-    for ext in (".py", ".ts", ".tsx"):
+    for ext in (".py", ".ts", ".tsx", ".js", ".jsx"):
         if p.endswith(ext):
             p = p[: -len(ext)]
     return p.replace("/", ".").lstrip(".")
 
+
+def _gate_path(project_id: str) -> str:
+    """Return the path to the gate file for a project."""
+    os.makedirs(_GATE_DIR, exist_ok=True)
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)
+    return os.path.join(_GATE_DIR, safe)
+
+
+def _gate_valid(project_id: str) -> bool:
+    """Return True if a fresh gate exists for this project."""
+    try:
+        return (time.time() - os.path.getmtime(_gate_path(project_id))) < GATE_TTL
+    except FileNotFoundError:
+        return False
+
+
+def _write_gate(project_id: str) -> None:
+    """Write or refresh the gate file for a project."""
+    open(_gate_path(project_id), "w").write(str(time.time()))
+
+
+def _fmt_ids(items: list, key: str = "id", n: int = 3) -> str:
+    """Format a short list of IDs for display."""
+    names = [".".join(i.get(key, "").split(".")[-2:]) for i in items[:n]]
+    return ", ".join(names) if names else "none"
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 try:
     data = json.loads(sys.stdin.read())
     tool = data.get("tool_name", "")
     inp = data.get("tool_input", {})
 
-    # ── Bash: nudge on grep against source files ──────────────────────────
+    # ── Bash: nudge on grep against source files ──────────────────────────────
     if tool == "Bash":
         cmd = inp.get("command", "")
         if (
             re.search(r"\bgrep\b", cmd)
-            and re.search(r"\.(py|ts|tsx)", cmd)
+            and re.search(r"\.(py|ts|tsx|js|jsx)", cmd)
             and not re.search(r"\b(git|pytest|rtk|ruff|mypy|test)\b", cmd)
         ):
             print(
@@ -85,19 +124,63 @@ try:
                 "  get_callers(fn) · get_callees(fn) · query_similar_functions(snippet)"
             )
 
-    # ── Read: nudge on source file reads ─────────────────────────────────
+    # ── Read: gate — fetch ACIP context on first access, block until seen ─────
     elif tool == "Read":
         path = inp.get("file_path", "")
-        if re.search(r"\.(py|ts|tsx)$", path) and "/scripts/" not in path:
+        if not re.search(r"\.(py|ts|tsx|js|jsx)$", path):
+            sys.exit(0)
+        if "/scripts/" in path or "/test" in path or "/__" in path:
+            sys.exit(0)
+
+        project_id = _project_id()
+        if not project_id:
+            sys.exit(0)
+
+        if _gate_valid(project_id):
+            # Gate is fresh — pass silently
+            sys.exit(0)
+
+        # Gate expired or absent — fetch ACIP context, display it, then block.
+        home = _get_project_home(project_id)
+        if not home:
+            # ACIP unreachable — nudge only, never hard-block
             print(
                 "[ACIP] Reading source — if exploring structure, MCP is faster:\n"
                 "  get_impact_radius(fn) · get_decision_history(fn) · get_callers(fn)"
             )
+            sys.exit(0)
 
-    # ── Edit: risk-signal check before modifying source ───────────────────
+        # Print architectural summary so the agent actually sees it
+        print(f"[ACIP] Architectural context — {project_id} "
+              f"({home.get('function_count', '?')} functions)")
+        print(f"  Chokepoints : {_fmt_ids(home.get('chokepoints', []))}")
+        print(f"  Risk surface: {_fmt_ids(home.get('risk_surface', []))}")
+        print(f"  Entry points: {_fmt_ids(home.get('entry_points', []))}")
+
+        ssl = home.get("since_last_session")
+        if ssl and any(ssl.get(k) for k in ("functions_added", "functions_modified", "functions_removed")):
+            added = len(ssl.get("functions_added", []))
+            modified = len(ssl.get("functions_modified", []))
+            removed = len(ssl.get("functions_removed", []))
+            print(f"  Since last session: +{added} ~{modified} -{removed} functions")
+
+        gaps = home.get("health", {}).get("top_knowledge_gaps", [])
+        if gaps:
+            print(f"  Top knowledge gap: {gaps[0].get('id', '').split('.')[-1]} "
+                  f"({gaps[0].get('caller_count', 0)} callers, no docstring/decisions)")
+
+        print()
+        print("[ACIP] Context loaded. Retry your Read — this message won't repeat "
+              f"for {GATE_TTL // 60} minutes.")
+
+        # Write gate so the immediate retry passes
+        _write_gate(project_id)
+        sys.exit(2)  # Block this attempt; next attempt passes
+
+    # ── Edit: risk-signal check before modifying source ───────────────────────
     elif tool == "Edit":
         path = inp.get("file_path", "")
-        if not re.search(r"\.(py|ts|tsx)$", path):
+        if not re.search(r"\.(py|ts|tsx|js|jsx)$", path):
             sys.exit(0)
 
         module = _file_to_module(path)
@@ -107,8 +190,10 @@ try:
 
         home = _get_project_home(project_id)
         if not home:
-            # ACIP unreachable — silent pass, never block
             sys.exit(0)
+
+        # A successful Edit-time ACIP call also refreshes the gate
+        _write_gate(project_id)
 
         warnings = []
 
@@ -145,6 +230,6 @@ try:
             )
 
 except Exception:
-    pass  # Never block Claude on hook error
+    pass  # Never block Claude on a hook error
 
 sys.exit(0)

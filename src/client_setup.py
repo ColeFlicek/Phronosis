@@ -13,11 +13,13 @@ import os
 # ── Template: Claude Code pre-edit hook ───────────────────────────────────────
 # Installed to ~/.claude/hooks/acip-suggest.py
 _HOOK_SCRIPT = r'''#!/usr/bin/env python3
-"""ACIP PreToolUse hook — risk checks on Edit, nudges on Bash/Read."""
-import json, os, re, sys, urllib.request
+"""ACIP PreToolUse hook — gate on Read, risk-check on Edit, nudge on Bash."""
+import json, os, re, sys, time, urllib.request
 
 ACIP_URL = os.environ.get("ACIP_URL", "{acip_url}")
 TIMEOUT = 3
+GATE_TTL = 1800
+_GATE_DIR = os.path.expanduser("~/.claude/acip_gates")
 
 def _project_id():
     pid = os.environ.get("ACIP_PROJECT", "")
@@ -44,9 +46,23 @@ def _project_home(pid):
 
 def _module(path):
     p = path
-    for ext in (".py",".ts",".tsx"):
+    for ext in (".py",".ts",".tsx",".js",".jsx"):
         if p.endswith(ext): p = p[:-len(ext)]
     return p.replace("/",".").lstrip(".")
+
+def _gate_path(pid):
+    os.makedirs(_GATE_DIR, exist_ok=True)
+    return os.path.join(_GATE_DIR, re.sub(r"[^a-zA-Z0-9_-]","_",pid))
+
+def _gate_valid(pid):
+    try: return (time.time()-os.path.getmtime(_gate_path(pid))) < GATE_TTL
+    except FileNotFoundError: return False
+
+def _write_gate(pid):
+    open(_gate_path(pid),"w").write(str(time.time()))
+
+def _fmt(items, key="id", n=3):
+    return ", ".join(".".join(i.get(key,"").split(".")[-2:]) for i in items[:n]) or "none"
 
 try:
     data = json.loads(sys.stdin.read())
@@ -55,25 +71,47 @@ try:
 
     if tool == "Bash":
         cmd = inp.get("command","")
-        if (re.search(r"\bgrep\b",cmd) and re.search(r"\.(py|ts|tsx)",cmd)
+        if (re.search(r"\bgrep\b",cmd) and re.search(r"\.(py|ts|tsx|js|jsx)",cmd)
                 and not re.search(r"\b(git|pytest|rtk|ruff|mypy|test)\b",cmd)):
             print("[ACIP] grep on source — MCP is faster:\n"
                   "  get_callers(fn) · get_callees(fn) · query_similar_functions(snippet)")
 
     elif tool == "Read":
         path = inp.get("file_path","")
-        if re.search(r"\.(py|ts|tsx)$",path) and "/scripts/" not in path:
+        if not re.search(r"\.(py|ts|tsx|js|jsx)$",path): sys.exit(0)
+        if any(x in path for x in ("/scripts/","/test","/__")): sys.exit(0)
+        pid = _project_id()
+        if not pid: sys.exit(0)
+        if _gate_valid(pid): sys.exit(0)
+        home = _project_home(pid)
+        if not home:
             print("[ACIP] Reading source — if exploring structure, MCP is faster:\n"
                   "  get_impact_radius(fn) · get_decision_history(fn) · get_callers(fn)")
+            sys.exit(0)
+        print(f"[ACIP] Architectural context — {pid} ({home.get('function_count','?')} functions)")
+        print(f"  Chokepoints : {_fmt(home.get('chokepoints',[]))}")
+        print(f"  Risk surface: {_fmt(home.get('risk_surface',[]))}")
+        print(f"  Entry points: {_fmt(home.get('entry_points',[]))}")
+        ssl = home.get("since_last_session")
+        if ssl and any(ssl.get(k) for k in ("functions_added","functions_modified","functions_removed")):
+            print(f"  Since last session: +{len(ssl.get('functions_added',[]))} "
+                  f"~{len(ssl.get('functions_modified',[]))} -{len(ssl.get('functions_removed',[]))} functions")
+        gaps = home.get("health",{}).get("top_knowledge_gaps",[])
+        if gaps:
+            print(f"  Top knowledge gap: {gaps[0].get('id','').split('.')[-1]} ({gaps[0].get('caller_count',0)} callers)")
+        print(f"\n[ACIP] Context loaded. Retry your Read — gate valid for {GATE_TTL//60} min.")
+        _write_gate(pid)
+        sys.exit(2)
 
     elif tool == "Edit":
         path = inp.get("file_path","")
-        if not re.search(r"\.(py|ts|tsx)$",path): sys.exit(0)
+        if not re.search(r"\.(py|ts|tsx|js|jsx)$",path): sys.exit(0)
         mod = _module(path)
         pid = _project_id()
         if not pid: sys.exit(0)
         home = _project_home(pid)
         if not home: sys.exit(0)
+        _write_gate(pid)
         warnings = []
         for cp in home.get("chokepoints",[]):
             fid = cp.get("id","")
