@@ -201,7 +201,13 @@ Return ONLY the JSON object, no markdown, no explanation."""
                 # Semantic check: embed the function's body text.
                 node = await self._db.get_node(fid, project_id)
                 if node:
-                    snippet = f"{node.get('signature', '')}\n{node.get('summary', '')}"
+                    # Use signature + docstring for semantic check — more concrete than
+                    # the one-sentence summary and closer to the violation example patterns.
+                    snippet = "\n".join(filter(None, [
+                        node.get("signature", ""),
+                        node.get("docstring", ""),
+                        node.get("summary", ""),
+                    ]))
                     is_viol, viol_score, comp_score = await self._embeddings.check_semantic(
                         contract["id"], snippet
                     )
@@ -276,7 +282,8 @@ Return ONLY the JSON object, no markdown, no explanation."""
 
         for pattern in prohibited:
             matching_callees = [
-                c for c, name in zip(callee_ids, callee_names) if pattern in name
+                c for c, name in zip(callee_ids, callee_names)
+                if name == pattern or name.startswith(pattern + "_") or name.endswith("_" + pattern)
             ]
             # If the required callee is also present, it's compliant.
             if required_callee:

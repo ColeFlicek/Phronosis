@@ -538,23 +538,17 @@ class EmbeddingStore:
         viol_score = round(1.0 - row[0] / 2.0, 4) if row else 0.0
 
         # Best similarity against compliance cluster.
-        async with conn.execute(
-            f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (comp_table,)
-        ) as cur:
-            comp_exists = await cur.fetchone()
+        # Table existence already confirmed above; just check row count.
         comp_score = 0.0
-        if comp_exists:
+        async with conn.execute(f"SELECT COUNT(*) FROM {comp_table}") as cur:
+            comp_count = (await cur.fetchone())[0]
+        if comp_count > 0:
             async with conn.execute(
-                f"SELECT COUNT(*) FROM {comp_table}"
+                f"SELECT distance FROM {comp_table} WHERE embedding MATCH ? AND k = 1",
+                (emb_bytes,),
             ) as cur:
-                comp_count = (await cur.fetchone())[0]
-            if comp_count > 0:
-                async with conn.execute(
-                    f"SELECT distance FROM {comp_table} WHERE embedding MATCH ? AND k = 1",
-                    (emb_bytes,),
-                ) as cur:
-                    row = await cur.fetchone()
-                comp_score = round(1.0 - row[0] / 2.0, 4) if row else 0.0
+                row = await cur.fetchone()
+            comp_score = round(1.0 - row[0] / 2.0, 4) if row else 0.0
 
         # Retrieve contract threshold.
         async with conn.execute(
