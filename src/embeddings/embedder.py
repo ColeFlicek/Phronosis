@@ -434,6 +434,138 @@ class EmbeddingStore:
         )
         await conn.commit()
 
+    # ── Layer 4: contract embeddings ───────────────────────────────────────
+
+    def _contract_table(self, contract_id: str, kind: str) -> str:
+        """vec0 table name for contract violation/compliance examples."""
+        safe = re.sub(r"[^a-zA-Z0-9]", "_", contract_id)
+        return f"contract_{kind}_{safe}"
+
+    async def _ensure_contract_tables(self, conn, contract_id: str) -> tuple[str, str]:
+        viol_table = self._contract_table(contract_id, "violation")
+        comp_table = self._contract_table(contract_id, "compliance")
+        for table in (viol_table, comp_table):
+            await conn.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0(
+                    id TEXT PRIMARY KEY,
+                    embedding FLOAT[{self._dim}]
+                )
+            """)
+        return viol_table, comp_table
+
+    async def upsert_contract_embeddings(
+        self,
+        contract_id: str,
+        violation_codes: list[str],
+        compliance_codes: list[str],
+    ) -> None:
+        """Embed violation/compliance examples and store in per-contract vec0 tables."""
+        import uuid
+        conn = self._db._db
+        viol_table, comp_table = await self._ensure_contract_tables(conn, contract_id)
+
+        # Clear existing embeddings for this contract.
+        await conn.execute(f"DELETE FROM {viol_table}")
+        await conn.execute(f"DELETE FROM {comp_table}")
+
+        all_codes = violation_codes + compliance_codes
+        if not all_codes:
+            await conn.commit()
+            return
+
+        embeddings = await self._embed_batch(all_codes)
+        viol_embs = embeddings[:len(violation_codes)]
+        comp_embs = embeddings[len(violation_codes):]
+
+        for emb in viol_embs:
+            await conn.execute(
+                f"INSERT OR REPLACE INTO {viol_table}(id, embedding) VALUES (?, ?)",
+                (str(uuid.uuid4()), _f32(emb)),
+            )
+        for emb in comp_embs:
+            await conn.execute(
+                f"INSERT OR REPLACE INTO {comp_table}(id, embedding) VALUES (?, ?)",
+                (str(uuid.uuid4()), _f32(emb)),
+            )
+        await conn.commit()
+
+    async def delete_contract_embeddings(self, contract_id: str) -> None:
+        """Drop vec0 tables for a deleted contract."""
+        conn = self._db._db
+        for kind in ("violation", "compliance"):
+            table = self._contract_table(contract_id, kind)
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ) as cur:
+                if await cur.fetchone():
+                    await conn.execute(f"DROP TABLE {table}")
+        await conn.commit()
+
+    async def check_semantic(
+        self, contract_id: str, code_snippet: str
+    ) -> tuple[bool, float, float]:
+        """
+        Check whether code_snippet violates a contract semantically.
+        Returns (is_violation, violation_score, compliance_score).
+        Flags as violation if violation_score >= threshold AND compliance_score < threshold.
+        """
+        conn = self._db._db
+        viol_table = self._contract_table(contract_id, "violation")
+        comp_table = self._contract_table(contract_id, "compliance")
+
+        for table in (viol_table, comp_table):
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ) as cur:
+                if not await cur.fetchone():
+                    return False, 0.0, 0.0
+
+        async with conn.execute(
+            f"SELECT COUNT(*) FROM {viol_table}"
+        ) as cur:
+            if (await cur.fetchone())[0] == 0:
+                return False, 0.0, 0.0
+
+        embedding = await self._embed_single(code_snippet)
+        emb_bytes = _f32(embedding)
+
+        # Best similarity against violation cluster (nearest neighbour).
+        async with conn.execute(
+            f"SELECT distance FROM {viol_table} WHERE embedding MATCH ? AND k = 1",
+            (emb_bytes,),
+        ) as cur:
+            row = await cur.fetchone()
+        viol_score = round(1.0 - row[0] / 2.0, 4) if row else 0.0
+
+        # Best similarity against compliance cluster.
+        async with conn.execute(
+            f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (comp_table,)
+        ) as cur:
+            comp_exists = await cur.fetchone()
+        comp_score = 0.0
+        if comp_exists:
+            async with conn.execute(
+                f"SELECT COUNT(*) FROM {comp_table}"
+            ) as cur:
+                comp_count = (await cur.fetchone())[0]
+            if comp_count > 0:
+                async with conn.execute(
+                    f"SELECT distance FROM {comp_table} WHERE embedding MATCH ? AND k = 1",
+                    (emb_bytes,),
+                ) as cur:
+                    row = await cur.fetchone()
+                comp_score = round(1.0 - row[0] / 2.0, 4) if row else 0.0
+
+        # Retrieve contract threshold.
+        async with conn.execute(
+            "SELECT threshold FROM contracts WHERE id = ?", (contract_id,)
+        ) as cur:
+            crow = await cur.fetchone()
+        threshold = crow[0] if crow else 0.85
+
+        is_violation = viol_score >= threshold and comp_score < threshold
+        return is_violation, viol_score, comp_score
+
     # ── Internals ──────────────────────────────────────────────────────────
 
     async def _embed_single(self, text: str) -> list[float]:

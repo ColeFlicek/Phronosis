@@ -70,6 +70,42 @@ CREATE TABLE IF NOT EXISTS decision_functions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_df_function ON decision_functions(function_id);
+
+CREATE TABLE IF NOT EXISTS contracts (
+    id                   TEXT PRIMARY KEY,
+    project_ids          TEXT NOT NULL DEFAULT '[]',
+    title                TEXT NOT NULL,
+    natural_language     TEXT NOT NULL,
+    rule_type            TEXT NOT NULL DEFAULT 'SEMANTIC',
+    structural_expression TEXT NOT NULL DEFAULT '{}',
+    threshold            REAL NOT NULL DEFAULT 0.85,
+    status               TEXT NOT NULL DEFAULT 'draft',
+    created_at           TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contract_examples (
+    id           TEXT PRIMARY KEY,
+    contract_id  TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+    example_type TEXT NOT NULL,
+    code         TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cex_contract ON contract_examples(contract_id);
+
+CREATE TABLE IF NOT EXISTS contract_violations (
+    id             TEXT PRIMARY KEY,
+    contract_id    TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+    function_id    TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    violation_type TEXT NOT NULL,
+    score          REAL NOT NULL DEFAULT 0.0,
+    detected_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cviol_contract   ON contract_violations(contract_id);
+CREATE INDEX IF NOT EXISTS idx_cviol_project    ON contract_violations(project_id);
+CREATE INDEX IF NOT EXISTS idx_cviol_function   ON contract_violations(function_id);
 """
 
 
@@ -494,6 +530,143 @@ class CallGraphDB:
                         seen.add(r["id"])
                         results.append(dict(r))
         return results
+
+    # ── Contracts ──────────────────────────────────────────────────────────
+
+    async def create_contract(
+        self,
+        contract_id: str,
+        project_ids: list[str],
+        title: str,
+        natural_language: str,
+        rule_type: str = "SEMANTIC",
+        structural_expression: str = "{}",
+        threshold: float = 0.85,
+    ) -> dict:
+        import json
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO contracts
+               (id, project_ids, title, natural_language, rule_type,
+                structural_expression, threshold, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)""",
+            (contract_id, json.dumps(project_ids), title, natural_language,
+             rule_type, structural_expression, threshold, now),
+        )
+        await self._db.commit()
+        return await self.get_contract(contract_id)
+
+    async def get_contract(self, contract_id: str) -> dict | None:
+        import json
+        async with self._db.execute(
+            "SELECT * FROM contracts WHERE id = ?", (contract_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        r = dict(row)
+        r["project_ids"] = json.loads(r["project_ids"])
+        return r
+
+    async def list_contracts(self, project_id: str | None = None) -> list[dict]:
+        import json
+        async with self._db.execute(
+            "SELECT * FROM contracts ORDER BY created_at DESC"
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        result = []
+        for r in rows:
+            r["project_ids"] = json.loads(r["project_ids"])
+            if project_id is None or project_id in r["project_ids"]:
+                result.append(r)
+        return result
+
+    async def update_contract_status(self, contract_id: str, status: str) -> None:
+        await self._db.execute(
+            "UPDATE contracts SET status = ? WHERE id = ?", (status, contract_id)
+        )
+        await self._db.commit()
+
+    async def update_contract_structural(
+        self, contract_id: str, structural_expression: str
+    ) -> None:
+        await self._db.execute(
+            "UPDATE contracts SET structural_expression = ? WHERE id = ?",
+            (structural_expression, contract_id),
+        )
+        await self._db.commit()
+
+    async def delete_contract(self, contract_id: str) -> None:
+        await self._db.execute("DELETE FROM contracts WHERE id = ?", (contract_id,))
+        await self._db.commit()
+
+    async def upsert_contract_examples(
+        self, contract_id: str, examples: list[dict]
+    ) -> None:
+        """Replace all examples for a contract. examples: [{type, code}]"""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            "DELETE FROM contract_examples WHERE contract_id = ?", (contract_id,)
+        )
+        import uuid
+        rows = [
+            (str(uuid.uuid4()), contract_id, ex["type"], ex["code"], now)
+            for ex in examples
+        ]
+        await self._db.executemany(
+            "INSERT INTO contract_examples(id, contract_id, example_type, code, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        await self._db.commit()
+
+    async def list_contract_examples(self, contract_id: str) -> list[dict]:
+        async with self._db.execute(
+            "SELECT * FROM contract_examples WHERE contract_id = ? ORDER BY created_at",
+            (contract_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def log_violation(
+        self,
+        contract_id: str,
+        function_id: str,
+        project_id: str,
+        violation_type: str,
+        score: float,
+    ) -> None:
+        import uuid
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO contract_violations
+               (id, contract_id, function_id, project_id, violation_type, score, detected_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), contract_id, function_id, project_id,
+             violation_type, score, now),
+        )
+        await self._db.commit()
+
+    async def list_violations(
+        self, project_id: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        if project_id:
+            async with self._db.execute(
+                """SELECT cv.*, c.title AS contract_title
+                   FROM contract_violations cv
+                   JOIN contracts c ON c.id = cv.contract_id
+                   WHERE cv.project_id = ?
+                   ORDER BY cv.detected_at DESC LIMIT ?""",
+                (project_id, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        async with self._db.execute(
+            """SELECT cv.*, c.title AS contract_title
+               FROM contract_violations cv
+               JOIN contracts c ON c.id = cv.contract_id
+               ORDER BY cv.detected_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 def _resolve_callee(callee_name: str, all_ids: set[str]) -> str:

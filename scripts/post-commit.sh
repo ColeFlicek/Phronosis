@@ -41,6 +41,54 @@ curl --silent --show-error --max-time 30 \
 
 echo "[acip] index_changes triggered for $(echo "$CHANGED" | wc -l | tr -d ' ') files (project: ${PROJECT_ID})"
 
+# ── Contract check ──────────────────────────────────────────────────────────────
+# Resolve function IDs for changed files then check against active contracts.
+# Non-blocking: violations are printed as warnings but do not fail the commit.
+
+CHANGED_SRC=$(echo "$CHANGED" | grep -E '\.(py|ts|tsx)$' || true)
+
+if [ -n "$CHANGED_SRC" ]; then
+  ABS_FILES_JSON=$(echo "$CHANGED_SRC" | while IFS= read -r f; do
+    [ -n "$f" ] && echo "\"${REPO_ROOT}/${f}\""
+  done | paste -sd ',' - | sed 's/^/[/' | sed 's/$/]/')
+
+  # Get function IDs for changed files.
+  FN_RESP=$(curl --silent --max-time 5 \
+    -X POST "${ACIP_URL}/api/functions" \
+    -H "Content-Type: application/json" \
+    -d "{\"files\": ${ABS_FILES_JSON}, \"project_id\": \"${PROJECT_ID}\"}" 2>/dev/null || echo '{}')
+
+  FUNCTION_IDS=$(echo "$FN_RESP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ids = d.get('function_ids', [])
+print(json.dumps(ids))
+" 2>/dev/null || echo '[]')
+
+  # Check contracts.
+  VIOLATIONS=$(curl --silent --max-time 15 \
+    -X POST "${ACIP_URL}/api/contracts/check" \
+    -H "Content-Type: application/json" \
+    -d "{\"project_id\": \"${PROJECT_ID}\", \"function_ids\": ${FUNCTION_IDS}}" 2>/dev/null || echo '{"violations":[]}')
+
+  VIOL_COUNT=$(echo "$VIOLATIONS" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+viols = d.get('violations', [])
+if viols:
+    print(f'[acip] ⚠  {len(viols)} contract violation(s) detected:')
+    for v in viols:
+        pct = f\"{v['score']*100:.0f}%\" if v['violation_type'] == 'semantic' else 'structural'
+        print(f'  [{v[\"violation_type\"]}] {v[\"function_id\"]} → {v.get(\"contract_title\",v[\"contract_id\"])} ({pct})')
+else:
+    print('[acip] contracts: ok (no violations)')
+" 2>/dev/null || echo '')
+
+  if [ -n "$VIOL_COUNT" ]; then
+    echo "$VIOL_COUNT" >&2
+  fi
+fi
+
 # ── Log decision ────────────────────────────────────────────────────────────────
 
 ACIP_PROJECT_ID="$PROJECT_ID" ACIP_URL="$ACIP_URL" REPO_ROOT="$REPO_ROOT" python3 - <<'PYEOF'

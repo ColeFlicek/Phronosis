@@ -17,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_graph.storage import CallGraphDB
+from .contracts.manager import ContractManager
 from .decision_memory.memory import DecisionMemory
 from .embeddings.embedder import EmbeddingStore
 from .indexer import Indexer, _derive_project_id
@@ -39,7 +40,11 @@ async def _get_services() -> dict[str, Any]:
         embeddings = await EmbeddingStore.create(db)
         decisions = await DecisionMemory.create(db, embeddings)
         indexer = Indexer(db, embeddings)
-        _services.update(db=db, embeddings=embeddings, decisions=decisions, indexer=indexer)
+        contracts = ContractManager(db, embeddings)
+        _services.update(
+            db=db, embeddings=embeddings, decisions=decisions,
+            indexer=indexer, contracts=contracts,
+        )
     return _services
 
 
@@ -242,6 +247,109 @@ async def query_decisions(
     return json.dumps(results)
 
 
+# ── Contract tools ────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def create_contract(
+    title: str,
+    natural_language: str,
+    project_ids: list[str] | None = None,
+) -> str:
+    """
+    Create a new Invariant Contract in draft mode.
+
+    Parses the natural language rule using Claude, generates violation and
+    compliance code examples, and stores a structural expression for the
+    call-graph check. Returns the draft with generated examples — call
+    approve_contract() to activate it, or update_contract_examples() to
+    edit the examples first.
+
+    title: short human-readable name for this contract
+    natural_language: plain English rule (e.g. "all DB reads must go through read_secrets")
+    project_ids: which projects this applies to. If omitted, requires explicit list.
+    """
+    svcs = await _get_services()
+    result = await svcs["contracts"].generate_draft(
+        project_ids=project_ids or [],
+        title=title,
+        natural_language=natural_language,
+    )
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def update_contract_examples(
+    contract_id: str,
+    violation_examples: list[str],
+    compliance_examples: list[str],
+) -> str:
+    """
+    Replace the violation and compliance code examples on a contract.
+
+    Use this before approving to edit AI-generated examples, add more,
+    or remove incorrect ones. If the contract is already active, the
+    embeddings are re-generated immediately.
+
+    violation_examples: code snippets that BREAK the rule
+    compliance_examples: code snippets that CORRECTLY FOLLOW the rule
+    """
+    svcs = await _get_services()
+    result = await svcs["contracts"].update_examples(
+        contract_id, violation_examples, compliance_examples
+    )
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def approve_contract(contract_id: str) -> str:
+    """
+    Activate a draft contract.
+
+    Embeds all violation and compliance examples into vec0 tables so that
+    semantic checking can run. Once active, the contract is enforced on
+    every call to check_contracts() and via the post-commit hook.
+    """
+    svcs = await _get_services()
+    result = await svcs["contracts"].approve(contract_id)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def list_contracts(project_id: str = "") -> str:
+    """
+    List all contracts with their examples and status.
+
+    project_id: filter to contracts that apply to this project. If omitted,
+    returns all contracts across all projects.
+    """
+    svcs = await _get_services()
+    result = await svcs["contracts"].list_contracts(project_id or None)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def check_contracts(project_id: str) -> str:
+    """
+    Run all active contracts against the current call graph for a project.
+
+    Returns a list of violations — both structural (call graph traversal)
+    and semantic (embedding similarity against violation examples).
+    """
+    svcs = await _get_services()
+    result = await svcs["contracts"].check_project(project_id)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def delete_contract(contract_id: str) -> str:
+    """
+    Delete a contract and its embeddings.
+    """
+    svcs = await _get_services()
+    await svcs["contracts"].delete(contract_id)
+    return json.dumps({"status": "deleted", "contract_id": contract_id})
+
+
 # ── Query HTTP endpoints ──────────────────────────────────────────────────────
 
 @mcp.custom_route("/api/functions", methods=["POST"])
@@ -400,6 +508,123 @@ async def http_log_decision(request: Request) -> JSONResponse:
             project_id=project_id,
         )
         return JSONResponse({"status": "ok", **result})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+# ── Contracts HTTP endpoints ──────────────────────────────────────────────────
+
+@mcp.custom_route("/api/contracts", methods=["GET"])
+async def http_list_contracts(request: Request) -> JSONResponse:
+    """GET /api/contracts?project_id=myapp"""
+    try:
+        project_id = request.query_params.get("project_id") or None
+        svcs = await _get_services()
+        result = await svcs["contracts"].list_contracts(project_id)
+        return JSONResponse({"contracts": result})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/contracts", methods=["POST"])
+async def http_create_contract(request: Request) -> JSONResponse:
+    """POST /api/contracts {title, natural_language, project_ids}"""
+    try:
+        data = await request.json()
+        svcs = await _get_services()
+        result = await svcs["contracts"].generate_draft(
+            project_ids=data.get("project_ids", []),
+            title=data.get("title", ""),
+            natural_language=data.get("natural_language", ""),
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/contracts/{contract_id}", methods=["PUT"])
+async def http_update_contract(request: Request) -> JSONResponse:
+    """PUT /api/contracts/{id} {violation_examples, compliance_examples}"""
+    try:
+        contract_id = request.path_params["contract_id"]
+        data = await request.json()
+        svcs = await _get_services()
+        result = await svcs["contracts"].update_examples(
+            contract_id,
+            data.get("violation_examples", []),
+            data.get("compliance_examples", []),
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/contracts/{contract_id}/approve", methods=["POST"])
+async def http_approve_contract(request: Request) -> JSONResponse:
+    """POST /api/contracts/{id}/approve"""
+    try:
+        contract_id = request.path_params["contract_id"]
+        svcs = await _get_services()
+        result = await svcs["contracts"].approve(contract_id)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/contracts/{contract_id}", methods=["DELETE"])
+async def http_delete_contract(request: Request) -> JSONResponse:
+    """DELETE /api/contracts/{id}"""
+    try:
+        contract_id = request.path_params["contract_id"]
+        svcs = await _get_services()
+        await svcs["contracts"].delete(contract_id)
+        return JSONResponse({"status": "deleted"})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/contracts/{contract_id}/deactivate", methods=["POST"])
+async def http_deactivate_contract(request: Request) -> JSONResponse:
+    """POST /api/contracts/{id}/deactivate — sets status back to draft"""
+    try:
+        contract_id = request.path_params["contract_id"]
+        svcs = await _get_services()
+        await svcs["contracts"].deactivate(contract_id)
+        return JSONResponse({"status": "ok"})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/contracts/check", methods=["POST"])
+async def http_check_contracts(request: Request) -> JSONResponse:
+    """
+    POST /api/contracts/check {project_id, function_ids}
+    Called by the post-commit hook to check newly committed functions.
+    """
+    try:
+        data = await request.json()
+        project_id: str = data.get("project_id", "")
+        function_ids: list[str] = data.get("function_ids", [])
+        if not project_id:
+            return JSONResponse({"violations": []})
+        svcs = await _get_services()
+        if function_ids:
+            violations = await svcs["contracts"].check_functions(project_id, function_ids)
+        else:
+            violations = await svcs["contracts"].check_project(project_id)
+        return JSONResponse({"violations": violations})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/violations", methods=["GET"])
+async def http_list_violations(request: Request) -> JSONResponse:
+    """GET /api/violations?project_id=myapp"""
+    try:
+        project_id = request.query_params.get("project_id") or None
+        svcs = await _get_services()
+        violations = await svcs["db"].list_violations(project_id)
+        return JSONResponse({"violations": violations})
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 

@@ -309,6 +309,12 @@ HTML = r"""<!DOCTYPE html>
         </svg>
         search
       </div>
+      <div class="nav-item" id="nav-contracts" onclick="showPanel('contracts')">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        contracts
+      </div>
       <div class="nav-item" id="nav-settings" onclick="showPanel('settings')">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"/>
@@ -554,6 +560,126 @@ HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- ─── CONTRACTS ─── -->
+      <div class="panel" id="panel-contracts">
+
+        <!-- Create form -->
+        <div class="card" style="margin-bottom:16px;" id="contract-create-card">
+          <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;">
+            <div>
+              <div class="section-title">new contract</div>
+              <div class="section-sub">define an architectural rule in plain english — ACIP generates enforceable examples</div>
+            </div>
+          </div>
+
+          <!-- Step 1: Define -->
+          <div id="contract-form-step" style="padding:20px;display:flex;flex-direction:column;gap:14px;">
+            <div>
+              <label class="field-label">title</label>
+              <input type="text" id="ct-title" placeholder="e.g. Password DB access must use read_secrets">
+            </div>
+            <div>
+              <label class="field-label">rule (plain english)</label>
+              <textarea id="ct-rule" style="min-height:72px;" placeholder="e.g. any code that reads the password database with raw SQL must go through read_secrets instead"></textarea>
+            </div>
+            <div>
+              <label class="field-label">apply to projects</label>
+              <select id="ct-projects" multiple style="min-height:80px;padding:6px;"></select>
+              <div style="font-size:10px;color:var(--text3);margin-top:4px;">hold Ctrl/Cmd to select multiple</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;">
+              <button class="btn btn-accent" id="ct-generate-btn" onclick="generateContract()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                </svg>
+                generate examples
+              </button>
+              <span id="ct-msg" style="font-size:11px;color:var(--text3);"></span>
+            </div>
+          </div>
+
+          <!-- Step 2: Review draft -->
+          <div id="contract-draft-step" style="display:none;padding:20px;display:none;flex-direction:column;gap:16px;">
+            <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg4);border:1px solid rgba(124,58,237,.2);border-radius:6px;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span style="font-size:11px;color:var(--accent2);">draft generated — review and edit examples before approving</span>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+              <div>
+                <label class="field-label" style="color:var(--red);">violation examples</label>
+                <div style="font-size:10px;color:var(--text3);margin-bottom:8px;">code that breaks the rule — one per textarea</div>
+                <div id="ct-viol-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+                <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addExample('violation')">+ add violation</button>
+              </div>
+              <div>
+                <label class="field-label" style="color:var(--green);">compliance examples</label>
+                <div style="font-size:10px;color:var(--text3);margin-bottom:8px;">code that correctly follows the rule — one per textarea</div>
+                <div id="ct-comp-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+                <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addExample('compliance')">+ add compliance</button>
+              </div>
+            </div>
+
+            <div>
+              <label class="field-label">structural expression</label>
+              <textarea id="ct-structural" style="min-height:60px;font-size:10px;color:var(--accent2);" readonly></textarea>
+              <div style="font-size:10px;color:var(--text3);margin-top:4px;">auto-extracted from rule — used for deterministic call-graph checking</div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:12px;">
+              <button class="btn btn-accent" id="ct-approve-btn" onclick="approveContract()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+                approve &amp; activate
+              </button>
+              <button class="btn btn-ghost btn-sm" onclick="discardDraft()">discard</button>
+              <span id="ct-approve-msg" style="font-size:11px;color:var(--text3);"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active contracts list -->
+        <div class="card" style="margin-bottom:16px;">
+          <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;">
+            <div>
+              <div class="section-title">active contracts</div>
+              <div class="section-sub" id="contracts-sub">loading...</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <select id="ct-filter-project" onchange="loadContracts()" style="width:160px;padding:6px 10px;font-size:11px;">
+                <option value="">all projects</option>
+              </select>
+              <button class="btn btn-ghost btn-sm" onclick="loadContracts()">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                </svg>
+                refresh
+              </button>
+            </div>
+          </div>
+          <div id="contracts-list-body"><div class="empty">loading...</div></div>
+        </div>
+
+        <!-- Violations log -->
+        <div class="card">
+          <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;">
+            <div>
+              <div class="section-title">violations log</div>
+              <div class="section-sub">structural and semantic violations detected at commit time</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="loadViolations()">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+              </svg>
+              refresh
+            </button>
+          </div>
+          <div id="violations-body"><div class="empty">no violations logged yet</div></div>
+        </div>
+
+      </div>
+
       <!-- ─── ADMIN ─── -->
       <div class="panel" id="panel-admin">
         <div class="card">
@@ -586,10 +712,11 @@ HTML = r"""<!DOCTYPE html>
     'nomic-embed-text':768,'mxbai-embed-large':1024,'all-minilm':384
   };
   const PAGE_META = {
-    overview: ['overview', 'system status · layer health · indexed projects'],
-    search:   ['search',   'semantic similarity search across indexed projects'],
-    settings: ['settings', 'embedding config · api key management'],
-    admin:    ['admin',    'diagnostics · maintenance tools'],
+    overview:  ['overview',  'system status · layer health · indexed projects'],
+    search:    ['search',    'semantic similarity search across indexed projects'],
+    contracts: ['contracts', 'invariant contracts · architectural rule enforcement'],
+    settings:  ['settings',  'embedding config · api key management'],
+    admin:     ['admin',     'diagnostics · maintenance tools'],
   };
   const KEY_DESC = {
     ANTHROPIC_API_KEY: 'required · generates one-line function summaries via claude haiku',
@@ -601,16 +728,6 @@ HTML = r"""<!DOCTYPE html>
   // Currently scoped project_id (empty = all).
   let _scopeId = '';
 
-  function showPanel(name) {
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.getElementById('panel-' + name).classList.add('active');
-    document.getElementById('nav-' + name).classList.add('active');
-    const [title, sub] = PAGE_META[name];
-    document.getElementById('page-title').textContent = title;
-    document.getElementById('page-sub').textContent   = sub;
-  }
-
   function setDot(id, state) { document.getElementById(id).className = 'dot ' + state; }
   function fmt(n) {
     if (n === undefined || n === null) return '—';
@@ -620,10 +737,10 @@ HTML = r"""<!DOCTYPE html>
   // ── Project scope selector ──────────────────────────────────────────────
 
   function populateProjectSelectors(projects) {
-    ['proj-scope', 'search-project'].forEach(selId => {
+    ['proj-scope', 'search-project', 'ct-filter-project'].forEach(selId => {
       const sel = document.getElementById(selId);
+      if (!sel) return;
       const cur = sel.value;
-      // Keep the "all projects" option, rebuild the rest.
       while (sel.options.length > 1) sel.remove(1);
       projects.forEach(p => {
         const opt = new Option(`${p.id}  (${fmt(p.node_count)} fns)`, p.id);
@@ -631,6 +748,17 @@ HTML = r"""<!DOCTYPE html>
       });
       if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
     });
+    // Multi-select for contract creation.
+    const ms = document.getElementById('ct-projects');
+    if (ms) {
+      const selected = [...ms.selectedOptions].map(o => o.value);
+      ms.innerHTML = '';
+      projects.forEach(p => {
+        const opt = new Option(p.id, p.id);
+        opt.selected = selected.includes(p.id);
+        ms.add(opt);
+      });
+    }
   }
 
   function onScopeChange() {
@@ -892,6 +1020,328 @@ HTML = r"""<!DOCTYPE html>
     } finally {
       btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> run health check`;
       btn.disabled = false;
+    }
+  }
+
+  // ── Contracts ───────────────────────────────────────────────────────────
+
+  let _draftContractId = null;
+
+  function showPanel(name) {
+    // Override the earlier definition to also load contracts data.
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.getElementById('panel-' + name).classList.add('active');
+    document.getElementById('nav-' + name).classList.add('active');
+    const [title, sub] = PAGE_META[name];
+    document.getElementById('page-title').textContent = title;
+    document.getElementById('page-sub').textContent   = sub;
+    if (name === 'contracts') {
+      loadContracts();
+      loadViolations();
+    }
+  }
+
+  async function generateContract() {
+    const title = document.getElementById('ct-title').value.trim();
+    const rule  = document.getElementById('ct-rule').value.trim();
+    const sel   = document.getElementById('ct-projects');
+    const pids  = [...sel.selectedOptions].map(o => o.value);
+    if (!title || !rule) {
+      document.getElementById('ct-msg').textContent = 'title and rule are required';
+      document.getElementById('ct-msg').style.color = 'var(--red)';
+      return;
+    }
+    const btn = document.getElementById('ct-generate-btn');
+    const msg = document.getElementById('ct-msg');
+    btn.disabled = true; btn.textContent = 'generating...';
+    msg.textContent = 'calling claude haiku to parse rule...'; msg.style.color = 'var(--text3)';
+    try {
+      const d = await fetch('/api/contracts', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({title, natural_language: rule, project_ids: pids}),
+      }).then(r => r.json());
+      if (d.status === 'error') throw new Error(d.detail);
+      _draftContractId = d.id;
+      showDraftReview(d);
+    } catch(e) {
+      msg.textContent = 'error: ' + e.message; msg.style.color = 'var(--red)';
+    } finally {
+      btn.disabled = false; btn.textContent = 'generate examples';
+    }
+  }
+
+  function showDraftReview(contract) {
+    document.getElementById('contract-form-step').style.display = 'none';
+    const draft = document.getElementById('contract-draft-step');
+    draft.style.display = 'flex';
+
+    // Violation examples.
+    const violList = document.getElementById('ct-viol-list');
+    violList.innerHTML = '';
+    (contract.violation_examples || []).forEach(code => {
+      violList.appendChild(makeExampleTextarea(code, 'violation'));
+    });
+
+    // Compliance examples.
+    const compList = document.getElementById('ct-comp-list');
+    compList.innerHTML = '';
+    (contract.compliance_examples || []).forEach(code => {
+      compList.appendChild(makeExampleTextarea(code, 'compliance'));
+    });
+
+    // Structural expression (read-only preview).
+    try {
+      const s = JSON.parse(contract.structural_expression || '{}');
+      document.getElementById('ct-structural').value = JSON.stringify(s, null, 2);
+    } catch(_) {
+      document.getElementById('ct-structural').value = contract.structural_expression || '{}';
+    }
+  }
+
+  function makeExampleTextarea(code, kind) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:relative;';
+    const ta = document.createElement('textarea');
+    ta.value = code;
+    ta.dataset.kind = kind;
+    ta.style.cssText = 'min-height:80px;font-size:10px;line-height:1.5;border-color:' +
+      (kind === 'violation' ? 'rgba(248,113,113,.3)' : 'rgba(74,222,128,.3)') + ';';
+    const del = document.createElement('button');
+    del.textContent = '×';
+    del.className = 'btn btn-ghost btn-sm';
+    del.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 7px;font-size:12px;';
+    del.onclick = () => wrap.remove();
+    wrap.appendChild(ta);
+    wrap.appendChild(del);
+    return wrap;
+  }
+
+  function addExample(kind) {
+    const list = document.getElementById(kind === 'violation' ? 'ct-viol-list' : 'ct-comp-list');
+    list.appendChild(makeExampleTextarea('', kind));
+  }
+
+  function discardDraft() {
+    if (_draftContractId) {
+      fetch(`/api/contracts/${_draftContractId}`, {method:'DELETE'});
+      _draftContractId = null;
+    }
+    resetCreateForm();
+  }
+
+  function resetCreateForm() {
+    document.getElementById('contract-form-step').style.display = 'flex';
+    document.getElementById('contract-draft-step').style.display = 'none';
+    document.getElementById('ct-title').value = '';
+    document.getElementById('ct-rule').value  = '';
+    document.getElementById('ct-msg').textContent = '';
+    document.getElementById('ct-approve-msg').textContent = '';
+  }
+
+  async function approveContract() {
+    if (!_draftContractId) return;
+
+    // Collect updated examples from textareas.
+    const viols = [...document.querySelectorAll('#ct-viol-list textarea')].map(t => t.value).filter(Boolean);
+    const comps = [...document.querySelectorAll('#ct-comp-list textarea')].map(t => t.value).filter(Boolean);
+
+    const btn = document.getElementById('ct-approve-btn');
+    const msg = document.getElementById('ct-approve-msg');
+    btn.disabled = true; btn.textContent = 'activating...';
+    msg.textContent = 'updating examples...'; msg.style.color = 'var(--text3)';
+
+    try {
+      // Save any edits first.
+      await fetch(`/api/contracts/${_draftContractId}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({violation_examples: viols, compliance_examples: comps}),
+      });
+
+      msg.textContent = 'embedding examples...';
+      const d = await fetch(`/api/contracts/${_draftContractId}/approve`, {
+        method:'POST'
+      }).then(r => r.json());
+      if (d.status === 'error') throw new Error(d.detail);
+
+      msg.textContent = '✓ contract activated'; msg.style.color = 'var(--green)';
+      _draftContractId = null;
+      setTimeout(() => { resetCreateForm(); loadContracts(); }, 1200);
+    } catch(e) {
+      msg.textContent = 'error: ' + e.message; msg.style.color = 'var(--red)';
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> approve &amp; activate';
+    }
+  }
+
+  async function loadContracts() {
+    const pid = document.getElementById('ct-filter-project')?.value || '';
+    const url = '/api/contracts' + (pid ? `?project_id=${encodeURIComponent(pid)}` : '');
+    const body = document.getElementById('contracts-list-body');
+    const sub  = document.getElementById('contracts-sub');
+    try {
+      const d = await fetch(url).then(r => r.json());
+      const contracts = d.contracts || [];
+      sub.textContent = `${contracts.length} contract${contracts.length !== 1 ? 's' : ''} · click to expand`;
+      if (!contracts.length) {
+        body.innerHTML = `<div class="empty">no contracts yet — create one above</div>`;
+        return;
+      }
+      body.innerHTML = contracts.map(c => renderContractRow(c)).join('');
+    } catch(e) {
+      body.innerHTML = `<div class="empty">error loading contracts: ${e.message}</div>`;
+    }
+  }
+
+  function renderContractRow(c) {
+    const statusColor = c.status === 'active' ? 'var(--green)' : 'var(--amber)';
+    const pids = (c.project_ids || []).map(p =>
+      `<span class="result-badge">${p}</span>`).join('');
+    const violCount = (c.violation_examples || []).length;
+    const compCount = (c.compliance_examples || []).length;
+
+    const violHtml = (c.violation_examples || []).map((code, i) => `
+      <div style="margin-bottom:6px;">
+        <div style="font-size:9px;color:var(--red);margin-bottom:3px;letter-spacing:.08em;">VIOLATION ${i+1}</div>
+        <textarea data-contract="${c.id}" data-kind="violation" data-idx="${i}"
+          style="min-height:72px;font-size:10px;line-height:1.5;border-color:rgba(248,113,113,.3);"
+          onchange="markEdited('${c.id}')">${escHtml(code)}</textarea>
+      </div>`).join('');
+
+    const compHtml = (c.compliance_examples || []).map((code, i) => `
+      <div style="margin-bottom:6px;">
+        <div style="font-size:9px;color:var(--green);margin-bottom:3px;letter-spacing:.08em;">COMPLIANCE ${i+1}</div>
+        <textarea data-contract="${c.id}" data-kind="compliance" data-idx="${i}"
+          style="min-height:72px;font-size:10px;line-height:1.5;border-color:rgba(74,222,128,.3);"
+          onchange="markEdited('${c.id}')">${escHtml(code)}</textarea>
+      </div>`).join('');
+
+    return `
+      <div style="border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;cursor:pointer;"
+             onclick="toggleContract('${c.id}')">
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+              <span style="font-size:12px;font-weight:700;color:var(--text);">${escHtml(c.title)}</span>
+              <span style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:${statusColor};">${c.status}</span>
+            </div>
+            <div style="font-size:10px;color:var(--text3);">${pids} &nbsp;${violCount} violations · ${compCount} compliance</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-left:16px;">
+            ${c.status === 'active'
+              ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();deactivateContract('${c.id}')">deactivate</button>`
+              : `<button class="btn btn-accent btn-sm" onclick="event.stopPropagation();reactivateContract('${c.id}')">activate</button>`}
+            <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="event.stopPropagation();deleteContract('${c.id}')">delete</button>
+          </div>
+        </div>
+        <div id="ct-expand-${c.id}" style="display:none;padding:0 18px 18px;border-top:1px solid var(--border);">
+          <div style="font-size:11px;color:var(--text2);margin:12px 0 14px;font-style:italic;">"${escHtml(c.natural_language)}"</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;">
+            <div>
+              <div style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--red);margin-bottom:8px;">violations</div>
+              ${violHtml || '<div style="color:var(--text3);font-size:11px;">none</div>'}
+            </div>
+            <div>
+              <div style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--green);margin-bottom:8px;">compliance</div>
+              ${compHtml || '<div style="color:var(--text3);font-size:11px;">none</div>'}
+            </div>
+          </div>
+          <div id="ct-save-row-${c.id}" style="display:none;align-items:center;gap:10px;">
+            <button class="btn btn-accent btn-sm" id="ct-save-btn-${c.id}"
+              onclick="saveContractExamples('${c.id}')">save changes</button>
+            <span id="ct-save-msg-${c.id}" style="font-size:11px;color:var(--text3);"></span>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function escHtml(s) {
+    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function toggleContract(id) {
+    const el = document.getElementById(`ct-expand-${id}`);
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  }
+
+  function markEdited(contractId) {
+    const row = document.getElementById(`ct-save-row-${contractId}`);
+    if (row) row.style.display = 'flex';
+  }
+
+  async function saveContractExamples(contractId) {
+    const viols = [...document.querySelectorAll(`[data-contract="${contractId}"][data-kind="violation"]`)].map(t => t.value).filter(Boolean);
+    const comps = [...document.querySelectorAll(`[data-contract="${contractId}"][data-kind="compliance"]`)].map(t => t.value).filter(Boolean);
+    const btn = document.getElementById(`ct-save-btn-${contractId}`);
+    const msg = document.getElementById(`ct-save-msg-${contractId}`);
+    btn.disabled = true; btn.textContent = 'saving...';
+    msg.textContent = ''; msg.style.color = 'var(--text3)';
+    try {
+      const d = await fetch(`/api/contracts/${contractId}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({violation_examples: viols, compliance_examples: comps}),
+      }).then(r => r.json());
+      if (d.status === 'error') throw new Error(d.detail);
+      msg.textContent = '✓ saved · embeddings updated'; msg.style.color = 'var(--green)';
+    } catch(e) {
+      msg.textContent = 'error: ' + e.message; msg.style.color = 'var(--red)';
+    } finally {
+      btn.disabled = false; btn.textContent = 'save changes';
+    }
+  }
+
+  async function deactivateContract(id) {
+    await fetch(`/api/contracts/${id}/deactivate`, {method:'POST'});
+    loadContracts();
+  }
+
+  async function reactivateContract(id) {
+    const msg = document.createElement('span');
+    try {
+      await fetch(`/api/contracts/${id}/approve`, {method:'POST'});
+      loadContracts();
+    } catch(e) { console.error(e); }
+  }
+
+  async function deleteContract(id) {
+    if (!confirm('Delete this contract and its embeddings?')) return;
+    await fetch(`/api/contracts/${id}`, {method:'DELETE'});
+    loadContracts();
+  }
+
+  async function loadViolations() {
+    const pid = document.getElementById('ct-filter-project')?.value || '';
+    const url = '/api/violations' + (pid ? `?project_id=${encodeURIComponent(pid)}` : '');
+    const body = document.getElementById('violations-body');
+    try {
+      const d = await fetch(url).then(r => r.json());
+      const viols = d.violations || [];
+      if (!viols.length) {
+        body.innerHTML = `<div class="empty">no violations logged yet</div>`;
+        return;
+      }
+      body.innerHTML = `<table class="data-table">
+        <thead><tr>
+          <th style="text-align:left;">function</th>
+          <th style="text-align:left;">contract</th>
+          <th>type</th><th>score</th><th>detected</th>
+        </tr></thead>
+        <tbody>${viols.map(v => `
+          <tr>
+            <td style="font-size:11px;color:var(--accent2);text-align:left;">${v.function_id}</td>
+            <td style="text-align:left;font-size:11px;">${v.contract_title || v.contract_id}</td>
+            <td><span style="font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:${v.violation_type==='structural'?'var(--red)':'var(--amber)'};">${v.violation_type}</span></td>
+            <td>${v.violation_type==='structural'?'—':(v.score*100).toFixed(0)+'%'}</td>
+            <td style="font-size:10px;color:var(--text3);">${(v.detected_at||'').slice(0,16).replace('T',' ')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    } catch(e) {
+      body.innerHTML = `<div class="empty">error: ${e.message}</div>`;
     }
   }
 
