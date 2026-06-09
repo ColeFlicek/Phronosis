@@ -6,22 +6,6 @@
 
 ## Active — implement next
 
-### Invariant Contracts
-Architectural rules encoded as live, enforceable constraints. Think of it as git hooks but for high-level design decisions.
-
-A constraint is a rule like "module X never directly calls module Y" or "all external API calls must pass through the rate limiter." Stored in a `constraints` table, validated against the call graph on every commit. If an agent violates one, it self-corrects before deployment. If a human violates one, the hook warns them immediately.
-
-The embedding layer finds semantically similar constraints to warn about near-misses — not just exact violations but patterns that rhyme with known-bad designs.
-
-**New surface area:**
-- `constraints` table: `(id, project_id, description, rule_type, expression, linked_function_ids, created_at)`
-- `add_constraint()` MCP tool
-- `check_constraints(project_id)` — validates current call graph, returns violations
-- `list_violations(project_id)` — standing violation log
-- Post-commit hook integration: auto-runs check, blocks or warns on violations
-
----
-
 ### Project Management Interface
 ACIP as the issue tracker — but one that knows about the codebase.
 
@@ -88,3 +72,8 @@ Measure whether tests cover the *behaviors* functions implement, not just the li
 | Similarity score normalization | 2026-06-09 | L2 → [0,1] match percentage |
 | Web UI project selector + search panel | 2026-06-09 | |
 | `/acip-import` slash command | 2026-06-08 | Three-step onboarding in one command |
+| Invariant Contracts | 2026-06-09 | LLM-generated violation/compliance examples, structural + semantic enforcement, MCP tools, web UI, post-commit hook. Destructive ops (delete/update) web-UI-only to prevent agent bypass. |
+| Project Home (`get_project_home`) | 2026-06-09 | Single MCP call returns subsystems, wiring, chokepoints, risk surface, health. Replaces file reads for architectural understanding. |
+| `setup_acip_client` one-call onboarding | 2026-06-09 | Generates setup script: hooks, settings.json, CLAUDE.md, memory files, git hook. |
+| PreToolUse hooks (Bash/Read/Edit) | 2026-06-09 | Risk-signal check on Edit; ACIP nudge on grep/Read. |
+| PostToolUse/Edit hook | 2026-06-09 | Auto-indexes edited file in background; warns when client_setup.py template sources are modified. |
