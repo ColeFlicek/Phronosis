@@ -859,8 +859,16 @@ class CallGraphDB:
         ]
 
         # ── Chokepoints: top 5 by caller count ───────────────────────────
+        # Filter to nodes that exist in the project index — external library
+        # calls (sqlalchemy .query, fastapi Depends, etc.) appear in edges but
+        # were never resolved to a node, so they would otherwise dominate.
+        all_node_ids = {n["id"] for n in all_nodes}
         chokepoints = sorted(
-            [{"id": nid, "caller_count": cnt} for nid, cnt in caller_counts.items()],
+            [
+                {"id": nid, "caller_count": cnt}
+                for nid, cnt in caller_counts.items()
+                if nid in all_node_ids
+            ],
             key=lambda x: -x["caller_count"],
         )[:5]
 
