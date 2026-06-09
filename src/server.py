@@ -31,6 +31,7 @@ _services_lock = asyncio.Lock()
 
 
 async def _get_services() -> dict[str, Any]:
+    """Return the shared service container, initializing it on first call."""
     if _services:
         return _services
     async with _services_lock:
@@ -51,6 +52,7 @@ async def _get_services() -> dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
+    """FastMCP lifespan — initialize all services on startup and close DB on shutdown."""
     await _get_services()
     yield
     if _services.get("db"):

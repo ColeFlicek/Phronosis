@@ -53,6 +53,7 @@ class TreeSitterParser:
 
     @property
     def supported_extensions(self) -> set[str]:
+        """Return the set of file extensions this parser can handle."""
         return set(self._parsers.keys())
 
     def parse_file(

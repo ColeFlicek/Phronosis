@@ -23,6 +23,7 @@ TIMEOUT = 3  # seconds — fast fail, never slow down the agent
 
 
 def _project_id() -> str:
+    """Resolve project ID from env, git remote, or repo dirname."""
     pid = os.environ.get("ACIP_PROJECT", "")
     if pid:
         return pid
@@ -47,6 +48,7 @@ def _project_id() -> str:
 
 
 def _get_project_home(project_id: str) -> dict:
+    """Fetch the ACIP project home snapshot; returns empty dict on any error."""
     try:
         safe = urllib.request.quote(project_id, safe="")
         url = f"{ACIP_URL}/api/project-home/{safe}"

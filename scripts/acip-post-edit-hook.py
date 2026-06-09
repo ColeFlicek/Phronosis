@@ -32,6 +32,7 @@ TEMPLATE_SOURCES = {
 
 
 def _project_id() -> str:
+    """Resolve project ID from env, git remote, or repo dirname."""
     pid = os.environ.get("ACIP_PROJECT", "")
     if pid:
         return pid
@@ -54,6 +55,7 @@ def _project_id() -> str:
 
 
 def _project_root() -> str:
+    """Return the git repository root path, or empty string if not in a repo."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],

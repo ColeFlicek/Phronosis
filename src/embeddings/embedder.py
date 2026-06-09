@@ -39,6 +39,7 @@ def _resolve_config() -> tuple[str, str, int, str]:
         file_cfg = {}
 
     def _get(key: str, default: str = "") -> str:
+        """Look up key in file config, then env; treat empty strings as unset."""
         val = file_cfg.get(key)
         if val:
             return val
@@ -221,6 +222,7 @@ class EmbeddingStore:
         existing_summaries: dict[str, str] | None = None,
         force_summaries: bool = False,
     ) -> None:
+        """Summarize and embed a batch of function chunks, storing results in sqlite-vec."""
         if not chunks:
             return
 
