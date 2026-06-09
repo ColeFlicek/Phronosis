@@ -34,6 +34,7 @@ DELAY_BETWEEN_CALLS = 0.5  # seconds — each call embeds via OpenAI/Ollama
 # ── Type classifier ────────────────────────────────────────────────────────────
 
 def classify(subject: str) -> str:
+    """Map a commit subject line to an ACIP decision type based on its leading verb."""
     low = subject.lower()
     if low.startswith(("fix", "bug", "patch", "hotfix", "revert")):
         return "Patch"
@@ -49,6 +50,7 @@ def classify(subject: str) -> str:
 # ── Git helpers ────────────────────────────────────────────────────────────────
 
 def git(*args: str) -> str:
+    """Run a git subcommand and return its stdout as a stripped string."""
     return subprocess.check_output(["git"] + list(args), stderr=subprocess.DEVNULL).decode().strip()
 
 
@@ -68,6 +70,7 @@ def derive_project_id() -> str:
 
 
 def get_commits(since: str | None, limit: int | None) -> list[dict]:
+    """Return a list of commit dicts (hash, subject, body) from git log."""
     cmd = ["git", "log", "--no-merges", "--format=%H\x1f%s\x1f%b\x1e"]
     if since:
         cmd += [f"--since={since}"]
@@ -91,6 +94,7 @@ def get_commits(since: str | None, limit: int | None) -> list[dict]:
 
 
 def get_changed_files(hash_: str) -> list[str]:
+    """Return dotted module IDs for source files changed in a given commit."""
     try:
         out = git("diff-tree", "--no-commit-id", "-r", "--name-only", hash_)
         return [
@@ -105,6 +109,7 @@ def get_changed_files(hash_: str) -> list[str]:
 # ── API call ───────────────────────────────────────────────────────────────────
 
 def post_decision(payload: dict) -> dict:
+    """POST a decision record to the ACIP /api/decisions endpoint and return the response."""
     data = json.dumps(payload).encode()
     req = Request(
         f"{ACIP_URL}/api/decisions",
@@ -117,6 +122,7 @@ def post_decision(payload: dict) -> dict:
 
 
 def check_server() -> bool:
+    """Verify the ACIP server is reachable and has decision memory operational."""
     try:
         req = Request(f"{ACIP_URL}/api/health", method="GET")
         with urlopen(req, timeout=5) as r:
@@ -130,6 +136,7 @@ def check_server() -> bool:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """Parse CLI args and backfill git history as ACIP decision records."""
     parser = argparse.ArgumentParser(description="Backfill ACIP decisions from git history")
     parser.add_argument("--dry-run", action="store_true", help="Print decisions without writing")
     parser.add_argument("--since", metavar="DATE", help="Only commits after DATE (e.g. 2024-01-01)")
