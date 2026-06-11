@@ -4,6 +4,7 @@ HTML = r"""<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ACIP</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' fill='none'><rect width='64' height='64' rx='14' fill='%230f172a'/><line x1='11' y1='53' x2='32' y2='11' stroke='%2338bdf8' stroke-width='4' stroke-linecap='round'/><line x1='32' y1='11' x2='53' y2='53' stroke='%2338bdf8' stroke-width='4' stroke-linecap='round'/><line x1='19' y1='38' x2='45' y2='38' stroke='%2338bdf8' stroke-width='3' stroke-linecap='round'/><circle cx='32' cy='11' r='5' fill='%237dd3fc'/><circle cx='19' cy='38' r='3.5' fill='%230ea5e9'/><circle cx='45' cy='38' r='3.5' fill='%230ea5e9'/><circle cx='11' cy='53' r='3.5' fill='%230ea5e9'/><circle cx='53' cy='53' r='3.5' fill='%230ea5e9'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>

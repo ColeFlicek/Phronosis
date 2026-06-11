@@ -225,63 +225,70 @@ class EmbeddingStore:
         project_id: str,
         existing_summaries: dict[str, str] | None = None,
         force_summaries: bool = False,
-    ) -> None:
-        """Summarize and embed a batch of function chunks, storing results in sqlite-vec."""
+    ) -> dict:
+        """Two-tier embedding: documented functions use the configured small model;
+        undocumented functions fall back to text-embedding-3-large.
+        Returns {"docs": N, "fallback": N}."""
         if not chunks:
-            return
+            return {"docs": 0, "fallback": 0}
 
-        cached_count = 0
-        docstring_count = 0
+        # Apply cached summaries and docstring-as-summary.
         if existing_summaries and not force_summaries:
             for chunk in chunks:
                 if not chunk.summary and chunk.id in existing_summaries:
                     cached = existing_summaries[chunk.id]
                     if cached:
                         chunk.summary = cached
-                        cached_count += 1
 
-        # Use docstring as summary directly — it's ground truth, no LLM needed.
         if not force_summaries:
             for chunk in chunks:
                 if not chunk.summary and chunk.docstring:
                     chunk.summary = chunk.docstring[:200]
-                    docstring_count += 1
 
-        needs_summary = [c for c in chunks if not c.summary or force_summaries]
-        print(f"[embeddings] summarising {len(needs_summary)}/{len(chunks)} functions "
-              f"({cached_count} from cache, {docstring_count} from docstring)")
+        # Tier 1: has summary, docstring, or leading comment → small model.
+        # Tier 2: nothing → large model for better code-query alignment.
+        doc_chunks = [c for c in chunks if c.summary or c.docstring or c.leading_comment]
+        raw_chunks = [c for c in chunks if not (c.summary or c.docstring or c.leading_comment)]
 
-        if needs_summary:
-            # Parallel summarization bounded by SUMMARY_CONCURRENCY.
-            sem = asyncio.Semaphore(SUMMARY_CONCURRENCY)
-
-            async def _summarize(chunk: FunctionChunk) -> str:
-                """Acquire a semaphore slot and generate a summary for one chunk."""
-                async with sem:
-                    return await self._generate_summary(chunk)
-
-            summaries = await asyncio.gather(*[_summarize(c) for c in needs_summary])
-            for chunk, summary in zip(needs_summary, summaries):
-                chunk.summary = summary
-
-        print(f"[embeddings] embedding {len(chunks)} functions via {self._provider}/{self._model}")
-        texts = [prepare_embed_text(chunk) for chunk in chunks]
-        embeddings = await self._embed_batch(texts)
+        print(f"[embeddings] two-tier: {len(doc_chunks)} documented ({self._model}), "
+              f"{len(raw_chunks)} undocumented ({self._large_model})")
 
         conn = self._db._db
         table = await self._ensure_emb_table(conn, project_id)
-        for chunk, embedding in zip(chunks, embeddings):
-            await conn.execute(
-                "UPDATE nodes SET summary = ? WHERE id = ? AND project_id = ?",
-                (chunk.summary, chunk.id, project_id),
-            )
-            await conn.execute(f"DELETE FROM {table} WHERE id = ?", (chunk.id,))
-            await conn.execute(
-                f"INSERT INTO {table}(id, embedding) VALUES (?, ?)",
-                (chunk.id, _f32(embedding)),
-            )
+
+        if doc_chunks:
+            texts = [prepare_embed_text(c) for c in doc_chunks]
+            embeddings = await self._embed_batch(texts)
+            for chunk, emb in zip(doc_chunks, embeddings):
+                await conn.execute(
+                    "UPDATE nodes SET summary = ?, embedding_model = ? WHERE id = ? AND project_id = ?",
+                    (chunk.summary, self._model, chunk.id, project_id),
+                )
+                await conn.execute(f"DELETE FROM {table} WHERE id = ?", (chunk.id,))
+                await conn.execute(
+                    f"INSERT INTO {table}(id, embedding) VALUES (?, ?)",
+                    (chunk.id, _f32(emb)),
+                )
+
+        if raw_chunks:
+            texts = [prepare_embed_text(c) for c in raw_chunks]
+            embeddings = await self._embed_batch_large(texts)
+            for chunk, emb in zip(raw_chunks, embeddings):
+                await conn.execute(
+                    "UPDATE nodes SET embedding_model = ? WHERE id = ? AND project_id = ?",
+                    (self._large_model, chunk.id, project_id),
+                )
+                await conn.execute(f"DELETE FROM {table} WHERE id = ?", (chunk.id,))
+                await conn.execute(
+                    f"INSERT INTO {table}(id, embedding) VALUES (?, ?)",
+                    (chunk.id, _f32(emb)),
+                )
+
         await conn.commit()
-        print(f"[embeddings] stored {len(chunks)} embeddings ok")
+        print(f"[embeddings] stored {len(chunks)} embeddings ok "
+              f"({len(doc_chunks)} small-model, {len(raw_chunks)} large-model)")
+
+        return {"docs": len(doc_chunks), "fallback": len(raw_chunks)}
 
     async def delete_by_file(self, file_path: str, project_id: str) -> None:
         """Remove embedding vectors for all functions belonging to a source file."""
