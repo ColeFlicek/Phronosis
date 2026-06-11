@@ -182,8 +182,9 @@ class EmbeddingStore:
                 )
             """)
             for node_id, emb_blob in vectors:
+                await conn.execute(f"DELETE FROM {table} WHERE id = ?", (node_id,))
                 await conn.execute(
-                    f"INSERT OR REPLACE INTO {table}(id, embedding) VALUES (?, ?)",
+                    f"INSERT INTO {table}(id, embedding) VALUES (?, ?)",
                     (node_id, emb_blob),
                 )
 
@@ -271,8 +272,9 @@ class EmbeddingStore:
                 "UPDATE nodes SET summary = ? WHERE id = ? AND project_id = ?",
                 (chunk.summary, chunk.id, project_id),
             )
+            await conn.execute(f"DELETE FROM {table} WHERE id = ?", (chunk.id,))
             await conn.execute(
-                f"INSERT OR REPLACE INTO {table}(id, embedding) VALUES (?, ?)",
+                f"INSERT INTO {table}(id, embedding) VALUES (?, ?)",
                 (chunk.id, _f32(embedding)),
             )
         await conn.commit()
@@ -427,8 +429,9 @@ class EmbeddingStore:
         """Embed a decision's reasoning text and store it in the decision_embeddings table."""
         embedding = await self._embed_single(text)
         conn = self._db._db
+        await conn.execute("DELETE FROM decision_embeddings WHERE id = ?", (decision_id,))
         await conn.execute(
-            "INSERT OR REPLACE INTO decision_embeddings(id, embedding) VALUES (?, ?)",
+            "INSERT INTO decision_embeddings(id, embedding) VALUES (?, ?)",
             (decision_id, _f32(embedding)),
         )
         await conn.commit()
@@ -504,12 +507,12 @@ class EmbeddingStore:
 
         for emb in viol_embs:
             await conn.execute(
-                f"INSERT OR REPLACE INTO {viol_table}(id, embedding) VALUES (?, ?)",
+                f"INSERT INTO {viol_table}(id, embedding) VALUES (?, ?)",
                 (str(uuid.uuid4()), _f32(emb)),
             )
         for emb in comp_embs:
             await conn.execute(
-                f"INSERT OR REPLACE INTO {comp_table}(id, embedding) VALUES (?, ?)",
+                f"INSERT INTO {comp_table}(id, embedding) VALUES (?, ?)",
                 (str(uuid.uuid4()), _f32(emb)),
             )
         await conn.commit()

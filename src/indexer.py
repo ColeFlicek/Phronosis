@@ -35,6 +35,19 @@ class Indexer:
         if not project_id:
             project_id = _derive_project_id(path)
 
+        if not os.path.exists(path):
+            return {
+                "status": "path not found",
+                "path": path,
+                "project_id": project_id,
+                "detail": (
+                    f"'{path}' does not exist on the ACIP server's filesystem. "
+                    "The server runs in Docker and cannot access paths on your local machine. "
+                    "Use POST /api/index-bulk instead — it accepts file contents directly: "
+                    '{"project_root": "...", "project_id": "...", "files": {"abs/path": "content"}}'
+                ),
+            }
+
         source_files = _collect_source_files(path)
         if not source_files:
             return {"status": "no source files found", "path": path, "project_id": project_id}

@@ -65,3 +65,4 @@ Measure whether tests cover the *behaviors* functions implement, not just the li
 | `setup_acip_client` one-call onboarding | 2026-06-09 | Generates setup script: hooks, settings.json, CLAUDE.md, memory files, git hook. |
 | PreToolUse hooks (Bash/Read/Edit) | 2026-06-09 | Risk-signal check on Edit; ACIP nudge on grep/Read. |
 | PostToolUse/Edit hook | 2026-06-09 | Auto-indexes edited file in background; warns when client_setup.py template sources are modified. |
+| Agent Improvement Filing (`file_improvement` / `list_improvements` / `resolve_improvement`) | 2026-06-09 | Cross-session agent crosstalk: agents file structured bug/enhancement reports mid-session; a later session reads open items and implements them. SQLite-backed, no external dependency. |
