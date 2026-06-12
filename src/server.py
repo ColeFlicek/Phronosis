@@ -163,6 +163,8 @@ async def enrich_summaries(project_id: str, limit: int = 500) -> str:
 @mcp.tool()
 async def get_callers(function_name: str, project_id: str = "") -> str:
     """
+    [EXECUTION TOOL — accepts a symbol name]
+
     Return all functions that call the specified function. Accepts a bare name,
     a qualified name (module.func), or a full id (module.Class.method).
 
@@ -176,6 +178,8 @@ async def get_callers(function_name: str, project_id: str = "") -> str:
 @mcp.tool()
 async def get_callees(function_name: str, project_id: str = "") -> str:
     """
+    [EXECUTION TOOL — accepts a symbol name]
+
     Return all functions called by the specified function.
 
     project_id: limit results to a specific project. If omitted, searches all projects.
@@ -190,6 +194,8 @@ async def get_impact_radius(
     function_name: str, depth: int = 2, project_id: str = ""
 ) -> str:
     """
+    [EXECUTION TOOL — accepts a symbol name]
+
     BFS traversal outward from function_name up to `depth` levels.
     Returns the set of functions that would be impacted by a change to
     function_name, annotated with their distance from the origin.
@@ -208,9 +214,15 @@ async def query_similar_functions(
     snippet: str, top_k: int = 10, project_id: str = ""
 ) -> str:
     """
+    [DISCOVERY TOOL — accepts natural language or a code snippet]
+
     Return the top-k functions semantically similar to the provided snippet.
     Surfaces parallel implementations, related modules, and similar patterns
-    that wouldn't appear in a grep or call trace.
+    that would not appear in a grep or call trace.
+
+    Use this when you do not yet know a function name — describe what you are
+    looking for in plain English and this tool finds it.  Once you have the
+    function name, switch to get_function_context for the full picture.
 
     project_id: limit results to a specific project. If omitted, searches across all projects.
     """
@@ -258,9 +270,11 @@ async def log_decision(
 @mcp.tool()
 async def get_decision_history(function_name: str, project_id: str = "") -> str:
     """
+    [EXECUTION TOOL — accepts a symbol name]
+
     Return the full decision lineage for a function — every Architectural,
     Design, Implementation, and Patch decision linked to it, in chronological
-    order. Call this before touching any function you didn't write.
+    order. Call this before touching any function you did not write.
 
     project_id: limit results to a specific project. If omitted, searches all projects.
     """
@@ -276,9 +290,12 @@ async def query_decisions(
     query_text: str, project_id: str = ""
 ) -> str:
     """
+    [DISCOVERY TOOL — accepts natural language]
+
     Semantic search over the full decision corpus. Useful for finding prior
-    decisions that are relevant to a new change, even if they aren't linked
-    to the specific function you're editing.
+    decisions that are relevant to a new change, even if they are not linked
+    to the specific function you are editing.  Input is plain English intent,
+    not a symbol name.
 
     project_id: limit results to a specific project. If omitted, searches all projects.
     """
@@ -369,6 +386,8 @@ async def setup_acip_client(
 @mcp.tool()
 async def get_project_home(project_id: str) -> str:
     """
+    [DISCOVERY TOOL — accepts a project_id, returns full architectural picture]
+
     Architectural intelligence snapshot for a project. Call this FIRST at the
     start of any session before reading files or forming an implementation plan.
 
@@ -867,6 +886,101 @@ async def http_list_violations(request: Request) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 
+
+
+
+# ── Unified Context Pipeline ───────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_function_context(
+    name: str,
+    project_id: str = "",
+    depth: int = 2,
+) -> str:
+    """
+    [EXECUTION TOOL — accepts a symbol name]
+
+    One-call comprehensive context for a function. Chains call graph traversal,
+    decision memory, and semantic similarity into a single enriched payload.
+
+    Replaces the common sequence of:
+      get_callers + get_callees + get_impact_radius + get_decision_history + query_similar_functions
+
+    Use this at Tier 2 after get_project_home — when you know which function you
+    are about to touch and need the full picture before editing.
+
+    name: function name, qualified name (module.func), or full ID (module.Class.method).
+    project_id: limit to a specific project. If omitted, searches all projects.
+    depth: call graph traversal depth for impact radius (default 2).
+
+    Returns a single dict containing:
+      - node: metadata (signature, docstring, file, module, type)
+      - callers: list of functions that call this one
+      - callees: list of functions this one calls
+      - impact_radius: functions affected by a change, with traversal depth
+      - decision_history: all architectural/design/implementation decisions linked here
+      - similar_functions: top-5 semantically similar functions
+    """
+    import asyncio as _asyncio
+    svcs = await _get_services()
+    db = svcs["db"]
+    decisions = svcs["decisions"]
+    embeddings = svcs["embeddings"]
+
+    pid = project_id or None
+
+    # Step 1: resolve the node
+    nodes = await db.find_node_by_name(name, pid)
+    if not nodes:
+        return json.dumps({"error": f"No function found matching '{name}'."})
+    node = nodes[0]
+    node_id = node["id"]
+    node_project = node.get("project_id", project_id)
+
+    # Step 2: fan out — all queries run concurrently
+    callers_task = _asyncio.create_task(db.get_callers(node_id, node_project))
+    callees_task = _asyncio.create_task(db.get_callees(node_id, node_project))
+    impact_task = _asyncio.create_task(db.get_impact_radius(node_id, depth, node_project))
+    history_task = _asyncio.create_task(decisions.get_decision_history(node_id, node_project))
+    similar_task = _asyncio.create_task(
+        embeddings.query_similar(
+            node.get("signature", "") + " " + node.get("docstring", ""),
+            top_k=6,
+            project_id=node_project,
+        )
+    )
+
+    callers, callees, impact, history, similar = await _asyncio.gather(
+        callers_task, callees_task, impact_task, history_task, similar_task,
+        return_exceptions=True,
+    )
+
+    def _safe(val, default):
+        return default if isinstance(val, Exception) else val
+
+    # Filter self from similar
+    similar_clean = [
+        s for s in _safe(similar, [])
+        if s.get("id") != node_id
+    ][:5]
+
+    return json.dumps({
+        "node": {
+            "id": node_id,
+            "name": node.get("name"),
+            "file": node.get("file"),
+            "module": node.get("module"),
+            "type": node.get("type"),
+            "signature": node.get("signature"),
+            "docstring": node.get("docstring"),
+            "summary": node.get("summary"),
+        },
+        "callers": _safe(callers, []),
+        "callees": _safe(callees, []),
+        "impact_radius": _safe(impact, []),
+        "decision_history": _safe(history, []),
+        "similar_functions": similar_clean,
+    })
 
 
 # ── LSIF / SCIP ingestion ─────────────────────────────────────────────────────
