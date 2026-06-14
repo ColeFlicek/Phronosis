@@ -1,25 +1,18 @@
-# Requires: nginx ingress controller + cert-manager with a ClusterIssuer named "letsencrypt-prod"
-#
-# Install cert-manager:
-#   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-#
-# Install nginx ingress (Hetzner / DigitalOcean):
-#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
+# TLS/cert-manager disabled for home server deployment.
+# To enable HTTPS on a public cluster:
+#   1. Install cert-manager
+#   2. Uncomment the tls section and cert-manager annotation
+#   3. Add the ClusterIssuer back (see git history)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: acip-ingress
   namespace: acip
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"  # long-running MCP connections
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   ingressClassName: nginx
-  tls:
-    - hosts:
-        - api.acip.dev
-      secretName: acip-tls
   rules:
     - host: api.acip.dev
       http:
@@ -31,18 +24,3 @@ spec:
                 name: acip-api-svc
                 port:
                   number: 3004
----
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: cole.flicek@gmail.com
-    privateKeySecretRef:
-      name: letsencrypt-prod-key
-    solvers:
-      - http01:
-          ingress:
-            class: nginx
