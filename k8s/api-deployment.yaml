@@ -4,11 +4,13 @@ metadata:
   name: acip-api-svc
   namespace: acip
 spec:
+  type: NodePort
   selector:
     app: acip-api
   ports:
     - port: 3004
       targetPort: 3004
+      nodePort: 30040
 ---
 apiVersion: apps/v1
 kind: Deployment
