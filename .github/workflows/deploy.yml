@@ -175,7 +175,7 @@ jobs:
         run: |
           kubectl apply -f k8s/ingress.yaml
           kubectl apply -f k8s/hpa-api.yaml
-          kubectl apply -f k8s/hpa-worker.yaml
+          # hpa-worker.yaml requires KEDA — install separately if needed
 
       # ── Wait for both deployments to become healthy ────────────────────────
       - name: Wait for rollout
