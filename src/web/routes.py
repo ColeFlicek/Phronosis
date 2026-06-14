@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Awaitable, Callable
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
@@ -9,8 +10,43 @@ from .config_store import get_key_info, read_file_config, write_file_config
 from .template import HTML
 
 
-def register_routes(mcp, get_services) -> None:
+def register_routes(
+    mcp,
+    get_services,
+    email_sender: Callable[[str, str], Awaitable[None]] | None = None,
+) -> None:
     """Register all HTTP API and UI routes on the FastMCP server instance."""
+
+    @mcp.custom_route("/api/signup", methods=["POST"])
+    async def api_signup(request: Request) -> JSONResponse:
+        """Create a user and email their API key. Body: {email: str}."""
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse({"status": "error", "detail": "Invalid JSON"}, status_code=400)
+
+        email = (data.get("email") or "").strip()
+        if not email:
+            return JSONResponse({"status": "error", "detail": "email is required"}, status_code=400)
+
+        svcs = await get_services()
+        db = svcs.db
+
+        try:
+            user = await db.create_user(email)
+        except Exception:
+            async with db._db.execute(
+                "SELECT id, email, plan FROM users WHERE email = ?", (email,)
+            ) as cur:
+                row = await cur.fetchone()
+            user = dict(row)
+
+        raw_key = await db.create_api_key(user["id"], name="signup")
+
+        if email_sender is not None:
+            await email_sender(email, raw_key)
+
+        return JSONResponse({"status": "ok", "message": "Check your email for your API key"})
 
     @mcp.custom_route("/ui", methods=["GET"])
     async def dashboard(request: Request) -> HTMLResponse:
@@ -113,6 +149,26 @@ def register_routes(mcp, get_services) -> None:
             return JSONResponse({"status": "ok"})
         except Exception as exc:
             return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
+
+    @mcp.custom_route("/api/jobs/{job_id}", methods=["GET"])
+    async def api_job_status(request: Request) -> JSONResponse:
+        """Return the status of a background job by ID."""
+        job_id = request.path_params.get("job_id", "")
+        try:
+            from rq.job import Job, NoSuchJobError
+            from src.queue import get_redis
+            job = Job.fetch(job_id, connection=get_redis())
+            status = job.get_status()
+            return JSONResponse({
+                "job_id": job_id,
+                "status": status.value if hasattr(status, "value") else str(status),
+                "result": job.result if job.is_finished else None,
+                "error": str(job.exc_info)[:500] if job.is_failed else None,
+            })
+        except Exception as exc:
+            if "NoSuchJobError" in type(exc).__name__ or "No such job" in str(exc):
+                return JSONResponse({"error": "job not found"}, status_code=404)
+            return JSONResponse({"error": str(exc)}, status_code=500)
 
     @mcp.custom_route("/api/health", methods=["GET"])
     async def api_health(request: Request) -> JSONResponse:

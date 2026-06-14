@@ -287,3 +287,79 @@ class DependencyFingerprinter:
             ],
             version_changes=version_changes,
         )
+
+
+# ── DB row deserialisation helpers ─────────────────────────────────────────────
+
+def fingerprint_payload(row: dict) -> dict:
+    """Deserialise a dependency_fingerprints DB row into the API response dict.
+
+    Merges snapshot_json and diff_json into a single flat dict so callers
+    never need to know the storage column names.
+    """
+    result = json.loads(row["snapshot_json"])
+    result["diff_from_previous"] = (
+        json.loads(row["diff_json"]) if row["diff_json"] else None
+    )
+    return result
+
+
+def fingerprint_from_row(row: dict) -> DependencyFingerprint:
+    """Deserialise a dependency_fingerprints DB row into a typed DependencyFingerprint."""
+    return DependencyFingerprint.from_dict(json.loads(row["snapshot_json"]))
+
+
+# ── Dependency health ──────────────────────────────────────────────────────────
+
+class DependencyChecker:
+    """Pure domain object — assembles a library health envelope from raw data.
+
+    No I/O, no async. Takes the outputs of DB queries already made by the
+    caller and computes the full health picture for a single library.
+    Testable with plain dicts.
+    """
+
+    def health_envelope(
+        self,
+        library: str,
+        dependents: list[dict],
+        payload: dict | None,
+    ) -> dict:
+        """
+        Build the full health envelope for a library.
+
+        library    — bare library name, e.g. "requests"
+        dependents — rows from get_library_dependents()
+        payload    — output of fingerprint_payload(), or None if no fingerprint exists
+        """
+        version = "unknown"
+        symbols: list[dict] = []
+        recent_changes: dict = {}
+
+        if payload:
+            lib_data = payload.get("libraries", {}).get(library, {})
+            version = lib_data.get("version", "unknown")
+            symbols = lib_data.get("symbols", [])
+
+            diff = payload.get("diff_from_previous") or {}
+            if diff:
+                recent_changes = {
+                    "removed_symbols": [s for s in diff.get("removed_symbols", [])
+                                        if s.get("library") == library],
+                    "added_symbols":   [s for s in diff.get("added_symbols", [])
+                                        if s.get("library") == library],
+                    "changed_symbols": [s for s in diff.get("changed_symbols", [])
+                                        if s.get("library") == library],
+                    "version_changes": [v for v in diff.get("version_changes", [])
+                                        if v.get("library") == library],
+                }
+
+        return {
+            "library": library,
+            "version": version,
+            "symbol_count": len(symbols),
+            "symbols": symbols,
+            "dependent_count": len(dependents),
+            "dependents": dependents,
+            "recent_changes": recent_changes,
+        }

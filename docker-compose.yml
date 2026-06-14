@@ -1,4 +1,23 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: acip
+      POSTGRES_PASSWORD: acip
+      POSTGRES_DB: acip
+    ports:
+      - "5432:5432"
+    volumes:
+      - acip_pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
   acip:
     build: .
     ports:
@@ -6,14 +25,33 @@ services:
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      SQLITE_PATH: /data/acip.db
+      DATABASE_URL: postgresql://acip:acip@postgres/acip
+      REDIS_URL: redis://redis:6379
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-    volumes:
-      - acip_data:/data
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  acip-worker:
+    build: .
+    command: python -m src.worker
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DATABASE_URL: postgresql://acip:acip@postgres/acip
+      REDIS_URL: redis://redis:6379
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-}
+    depends_on:
+      - postgres
+      - redis
     restart: unless-stopped
 
 volumes:
-  acip_data:
+  acip_pgdata:

@@ -111,6 +111,14 @@ class Indexer:
         delta = reconcile(old_hashes, new_hashes)
         await self._pipeline.delete_by_ids(list(delta.to_delete), project_id)
 
+        # Drop stale Claude summaries for functions whose body changed. A summary
+        # generated when a function had no docstring becomes misleading if a good
+        # docstring has since been added. Clearing it lets the pipeline treat the
+        # function on its own docstring merit and lets enrich_summaries regenerate
+        # a fresh summary on the next explicit run.
+        for fn_id in delta.to_embed:
+            existing_summaries.pop(fn_id, None)
+
         # Wipe and rewrite call graph for all parsed files (edges change at file granularity).
         for fp in contents:
             await self._db.delete_file_data(fp, project_id)
@@ -282,6 +290,10 @@ class Indexer:
             }
             file_delta = reconcile(file_old_hashes, new_hashes)
             await self._pipeline.delete_by_ids(list(file_delta.to_delete), project_id)
+
+            # Clear stale Claude summaries for functions whose body changed.
+            for fn_id in file_delta.to_embed:
+                existing_summaries.pop(fn_id, None)
 
             # Refresh call graph for the whole file — edges can change in any function.
             await self._db.delete_file_data(fp, project_id)

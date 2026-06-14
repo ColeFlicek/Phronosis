@@ -88,9 +88,17 @@ class EmbeddingPipeline:
         )
         return {"docs": len(doc_chunks), "fallback": len(raw_chunks)}
 
-    async def enrich_summaries(self, project_id: str, limit: int = 500) -> dict:
-        """LLM-summarize functions on the large-model fallback, then re-embed with the small model."""
-        rows = await self._db.get_nodes_needing_enrichment(project_id, limit)
+    async def enrich_summaries(
+        self, project_id: str, limit: int = 500, force: bool = False
+    ) -> dict:
+        """LLM-summarize functions on the large-model fallback, then re-embed with the small model.
+
+        force=True: re-summarize even functions that already have a summary. Use this when
+        docstrings or comments have been added/updated and the old Claude summary is stale.
+        Without force, calling enrich_summaries repeatedly is safe and cheap — already-
+        summarized functions are skipped.
+        """
+        rows = await self._db.get_nodes_needing_enrichment(project_id, limit, force=force)
 
         if not rows:
             return {

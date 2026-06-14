@@ -1,0 +1,21 @@
+# Worker HPA scales on Redis queue depth via KEDA (Kubernetes Event-Driven Autoscaling).
+# Install KEDA: https://keda.sh/docs/latest/deploy/
+#
+# Without KEDA, start with fixed replicas in worker-deployment.yaml (replicas: 1)
+# and manually scale when queue depth grows.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: acip-worker-scaledobject
+  namespace: acip
+spec:
+  scaleTargetRef:
+    name: acip-worker
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  triggers:
+    - type: redis
+      metadata:
+        address: redis-svc.acip.svc.cluster.local:6379
+        listName: "rq:queue:acip-indexing"
+        listLength: "5"   # one extra worker per 5 queued jobs

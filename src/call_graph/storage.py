@@ -2,295 +2,145 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
 from .models import GraphData
 from .parser import CallEdge, FunctionNode
 
-# DDL for fresh installs — uses multi-project schema from the start.
-# Existing single-project DBs are upgraded by _migrate_to_multi_project().
-#
-# NOTE: project_id-dependent indexes are NOT in this DDL — they are created
-# in _ensure_indexes() which runs after migration, so they work on both
-# fresh installs (project_id in schema) and post-migration upgraded DBs.
-DDL = """
-CREATE TABLE IF NOT EXISTS projects (
-    id           TEXT PRIMARY KEY,
-    name         TEXT NOT NULL,
-    root         TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL,
-    last_indexed TEXT
-);
 
-CREATE TABLE IF NOT EXISTS nodes (
-    project_id  TEXT NOT NULL DEFAULT 'default',
-    id          TEXT NOT NULL,
-    file        TEXT NOT NULL,
-    module      TEXT NOT NULL,
-    type        TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    signature   TEXT NOT NULL DEFAULT '',
-    docstring   TEXT NOT NULL DEFAULT '',
-    summary     TEXT NOT NULL DEFAULT '',
-    body_hash      TEXT NOT NULL DEFAULT '',
-    decorators     TEXT NOT NULL DEFAULT '[]',
-    embedding_model TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (project_id, id)
-);
+def _pg(sql: str) -> str:
+    """Convert SQLite ? placeholders to PostgreSQL $1, $2, ... positional params."""
+    n = 0
+    def _sub(_m):
+        nonlocal n
+        n += 1
+        return f"${n}"
+    return re.sub(r"\?", _sub, sql)
 
-CREATE TABLE IF NOT EXISTS edges (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id  TEXT NOT NULL DEFAULT 'default',
-    caller_id   TEXT NOT NULL,
-    callee_id   TEXT NOT NULL,
-    edge_type   TEXT NOT NULL,
-    file        TEXT NOT NULL
-);
 
-CREATE INDEX IF NOT EXISTS idx_edges_caller ON edges(caller_id);
-CREATE INDEX IF NOT EXISTS idx_edges_callee ON edges(callee_id);
-CREATE INDEX IF NOT EXISTS idx_nodes_file   ON nodes(file);
-CREATE INDEX IF NOT EXISTS idx_nodes_name   ON nodes(name);
+class _Cursor:
+    """Minimal cursor-like wrapper so asyncpg results look like aiosqlite cursors."""
 
-CREATE TABLE IF NOT EXISTS decisions (
-    id                   TEXT PRIMARY KEY,
-    project_id           TEXT NOT NULL DEFAULT 'default',
-    type                 TEXT NOT NULL,
-    description          TEXT NOT NULL,
-    rejected_alternatives TEXT NOT NULL DEFAULT '',
-    trigger              TEXT NOT NULL DEFAULT '',
-    parent_decision_id   TEXT,
-    created_at           TEXT NOT NULL
-);
+    def __init__(self, rows, description=None):
+        self._rows = rows
+        self.description = description or []
 
-CREATE TABLE IF NOT EXISTS decision_functions (
-    decision_id  TEXT NOT NULL,
-    function_id  TEXT NOT NULL,
-    PRIMARY KEY (decision_id, function_id)
-);
+    async def fetchall(self):
+        return self._rows
 
-CREATE INDEX IF NOT EXISTS idx_df_function ON decision_functions(function_id);
+    async def fetchone(self):
+        return self._rows[0] if self._rows else None
 
-CREATE TABLE IF NOT EXISTS contracts (
-    id                   TEXT PRIMARY KEY,
-    project_ids          TEXT NOT NULL DEFAULT '[]',
-    title                TEXT NOT NULL,
-    natural_language     TEXT NOT NULL,
-    rule_type            TEXT NOT NULL DEFAULT 'SEMANTIC',
-    structural_expression TEXT NOT NULL DEFAULT '{}',
-    threshold            REAL NOT NULL DEFAULT 0.85,
-    status               TEXT NOT NULL DEFAULT 'draft',
-    created_at           TEXT NOT NULL
-);
+    async def __aenter__(self):
+        return self
 
-CREATE TABLE IF NOT EXISTS contract_examples (
-    id           TEXT PRIMARY KEY,
-    contract_id  TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
-    example_type TEXT NOT NULL,
-    code         TEXT NOT NULL,
-    created_at   TEXT NOT NULL
-);
+    async def __aexit__(self, *_):
+        pass
 
-CREATE INDEX IF NOT EXISTS idx_cex_contract ON contract_examples(contract_id);
 
-CREATE TABLE IF NOT EXISTS contract_violations (
-    id             TEXT PRIMARY KEY,
-    contract_id    TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
-    function_id    TEXT NOT NULL,
-    project_id     TEXT NOT NULL,
-    violation_type TEXT NOT NULL,
-    score          REAL NOT NULL DEFAULT 0.0,
-    detected_at    TEXT NOT NULL
-);
+class _DB:
+    """Asyncpg pool wrapper with an aiosqlite-compatible interface.
 
-CREATE INDEX IF NOT EXISTS idx_cviol_contract   ON contract_violations(contract_id);
-CREATE INDEX IF NOT EXISTS idx_cviol_project    ON contract_violations(project_id);
-CREATE INDEX IF NOT EXISTS idx_cviol_function   ON contract_violations(function_id);
+    Allows CallGraphDB methods to use the same execute/fetchall/fetchone
+    patterns they used with aiosqlite, without rewriting every query site.
+    """
 
-CREATE TABLE IF NOT EXISTS agent_improvements (
-    id                 TEXT PRIMARY KEY,
-    project_id         TEXT NOT NULL DEFAULT '',
-    title              TEXT NOT NULL,
-    description        TEXT NOT NULL,
-    affected_functions TEXT NOT NULL DEFAULT '[]',
-    severity           TEXT NOT NULL DEFAULT 'medium',
-    suggested_fix      TEXT NOT NULL DEFAULT '',
-    reproduction_steps TEXT NOT NULL DEFAULT '',
-    status             TEXT NOT NULL DEFAULT 'open',
-    filed_at           TEXT NOT NULL,
-    resolved_at        TEXT,
-    resolution_notes   TEXT NOT NULL DEFAULT ''
-);
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
 
-CREATE INDEX IF NOT EXISTS idx_impr_project ON agent_improvements(project_id);
-CREATE INDEX IF NOT EXISTS idx_impr_status  ON agent_improvements(status);
+    def execute(self, sql: str, params=()):
+        """Return an async context manager that runs a query and exposes results."""
+        return _QueryContext(self._pool, _pg(sql), params)
 
-CREATE TABLE IF NOT EXISTS project_home_snapshots (
-    project_id   TEXT PRIMARY KEY,
-    hashes       TEXT NOT NULL DEFAULT '{}',
-    captured_at  TEXT NOT NULL
-);
+    async def executemany(self, sql: str, data) -> None:
+        if not data:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.executemany(_pg(sql), data)
 
-CREATE TABLE IF NOT EXISTS dependency_fingerprints (
-    id               TEXT PRIMARY KEY,
-    project_id       TEXT NOT NULL,
-    captured_at      TEXT NOT NULL,
-    fingerprint_hash TEXT NOT NULL,
-    snapshot_json    TEXT NOT NULL,
-    diff_json        TEXT
-);
+    async def commit(self) -> None:
+        pass  # asyncpg auto-commits in non-transaction context
 
-CREATE INDEX IF NOT EXISTS idx_depfp_project ON dependency_fingerprints(project_id, captured_at);
-"""
+    async def close(self) -> None:
+        await self._pool.close()
+
+
+class _QueryContext:
+    """Returned by _DB.execute(). Supports both usage patterns:
+
+    await db.execute(sql, params)                       — fire-and-forget
+    async with db.execute(sql, params) as cur: ...      — fetch results
+    """
+
+    def __init__(self, pool, sql, params):
+        self._pool = pool
+        self._sql = sql
+        self._params = params
+
+    def __await__(self):
+        return self._run().__await__()
+
+    async def _run(self) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(self._sql, *self._params)
+
+    async def __aenter__(self) -> _Cursor:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(self._sql, *self._params)
+        return _Cursor(rows)
+
+    async def __aexit__(self, *_):
+        pass
+
+
+# Schema is in schema.sql — applied at init() via asyncpg.
+
+
+_DEFAULT_DSN = "postgresql://acip:acip@localhost/acip"
+_SCHEMA_SQL = Path(__file__).parent.parent.parent / "schema.sql"
 
 
 class CallGraphDB:
-    def __init__(self, db_path: str) -> None:
-        """Store the database path; connection is opened by init()."""
-        self._path = db_path
-        self._db: aiosqlite.Connection | None = None
+    def __init__(self, dsn: str) -> None:
+        """Store the DSN; connection pool is opened by init()."""
+        self._dsn = dsn
+        self._pool: asyncpg.Pool | None = None
+        self._db: _DB | None = None
+        # In-memory cache for get_project_home_data: project_id → (monotonic_ts, result)
+        self._project_home_cache: dict[str, tuple[float, dict]] = {}
 
     @classmethod
-    async def create(cls, db_path: str) -> "CallGraphDB":
+    async def create(cls, dsn: str = "") -> "CallGraphDB":
         """Async factory — create and fully initialize a CallGraphDB instance."""
-        obj = cls(db_path)
+        resolved = dsn or os.getenv("DATABASE_URL", _DEFAULT_DSN)
+        obj = cls(resolved)
         await obj.init()
         return obj
 
     async def init(self) -> None:
-        """Open the SQLite connection, apply DDL, and run schema migrations."""
-        self._db = await aiosqlite.connect(self._path, check_same_thread=False)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.executescript(DDL)
-        await self._check_and_migrate()
-        # Create project_id-dependent indexes after migration so they work on
-        # both fresh installs and upgraded DBs.
-        await self._ensure_indexes()
+        """Open the asyncpg connection pool and apply schema."""
+        from pgvector.asyncpg import register_vector
 
-    async def _check_and_migrate(self) -> None:
-        """Detect old single-project schema and upgrade in place."""
-        async with self._db.execute("PRAGMA table_info(nodes)") as cur:
-            cols = {row[1] for row in await cur.fetchall()}
-        if "project_id" not in cols:
-            await self._migrate_to_multi_project()
-        if "decorators" not in cols:
-            await self._db.execute(
-                "ALTER TABLE nodes ADD COLUMN decorators TEXT NOT NULL DEFAULT '[]'"
-            )
-            await self._db.commit()
-        if "embedding_model" not in cols:
-            await self._db.execute(
-                "ALTER TABLE nodes ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''"
-            )
-            await self._db.commit()
-        if "is_external" not in cols:
-            await self._db.execute(
-                "ALTER TABLE nodes ADD COLUMN is_external INTEGER NOT NULL DEFAULT 0"
-            )
-            await self._db.commit()
+        async def _init_conn(conn: asyncpg.Connection) -> None:
+            await register_vector(conn)
 
-    async def _ensure_indexes(self) -> None:
-        """Idempotent creation of project_id-dependent indexes. Safe after migration."""
-        await self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_nodes_project ON nodes(project_id)"
+        self._pool = await asyncpg.create_pool(
+            self._dsn, min_size=2, max_size=10, init=_init_conn
         )
-        await self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_edges_project ON edges(project_id)"
-        )
-        # Replace old unique index (no project_id) with the multi-project version.
-        await self._db.execute("DROP INDEX IF EXISTS idx_edges_unique")
-        await self._db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique "
-            "ON edges(project_id, caller_id, callee_id, edge_type, file)"
-        )
-        await self._db.commit()
-
-    async def _migrate_to_multi_project(self) -> None:
-        """
-        One-time migration from single-project to multi-project schema.
-        Existing data is assigned to project_id='default'.
-        vec0 embedding tables are dropped and recreated by EmbeddingStore.init()
-        because their IDs will change format ({project_id}::{node_id}).
-        """
-        print("[storage] Migrating schema to multi-project — existing data → project 'default'")
-
-        # Dedup edges before adding the unique index (old rows may have duplicates).
-        await self._db.execute(
-            "DELETE FROM edges WHERE rowid NOT IN "
-            "(SELECT MIN(rowid) FROM edges GROUP BY caller_id, callee_id, edge_type, file)"
-        )
-
-        # Rebuild nodes with composite PK (project_id, id).
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS nodes_new (
-                project_id  TEXT NOT NULL DEFAULT 'default',
-                id          TEXT NOT NULL,
-                file        TEXT NOT NULL,
-                module      TEXT NOT NULL,
-                type        TEXT NOT NULL,
-                name        TEXT NOT NULL,
-                signature   TEXT NOT NULL DEFAULT '',
-                docstring   TEXT NOT NULL DEFAULT '',
-                summary     TEXT NOT NULL DEFAULT '',
-                body_hash   TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (project_id, id)
-            )
-        """)
-        await self._db.execute("""
-            INSERT OR IGNORE INTO nodes_new
-            SELECT 'default', id, file, module, type, name,
-                   signature, docstring, summary,
-                   COALESCE(body_hash, '')
-            FROM nodes
-        """)
-        await self._db.execute("DROP TABLE nodes")
-        await self._db.execute("ALTER TABLE nodes_new RENAME TO nodes")
-
-        # Add project_id to edges.
-        try:
-            await self._db.execute(
-                "ALTER TABLE edges ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'"
-            )
-        except Exception:
-            pass  # already exists (shouldn't happen, but safe)
-
-        # Add project_id to decisions.
-        try:
-            await self._db.execute(
-                "ALTER TABLE decisions ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'"
-            )
-        except Exception:
-            pass
-
-        # Create projects table and register default project.
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
-                id           TEXT PRIMARY KEY,
-                name         TEXT NOT NULL,
-                root         TEXT NOT NULL DEFAULT '',
-                created_at   TEXT NOT NULL,
-                last_indexed TEXT
-            )
-        """)
-        await self._db.execute(
-            "INSERT OR IGNORE INTO projects(id, name, root, created_at) "
-            "VALUES ('default', 'default', '', datetime('now'))"
-        )
-
-        # NOTE: function_embeddings / decision_embeddings (vec0 virtual tables) are NOT
-        # dropped here — the vec0 extension is not loaded at this stage. EmbeddingStore.init()
-        # loads the extension and detects old-format IDs, wiping them before re-index.
-
-        await self._db.commit()
-        print("[storage] Migration to multi-project schema complete.")
-        print("[storage] NOTE: Embeddings will be cleared by EmbeddingStore on next startup.")
+        self._db = _DB(self._pool)
+        schema = _SCHEMA_SQL.read_text()
+        async with self._pool.acquire() as conn:
+            await conn.execute(schema)
 
     async def close(self) -> None:
-        """Close the underlying SQLite connection."""
+        """Close the connection pool."""
         if self._db:
             await self._db.close()
 
@@ -425,12 +275,20 @@ class CallGraphDB:
             )
 
     async def get_nodes_needing_enrichment(
-        self, project_id: str, limit: int = 500
+        self, project_id: str, limit: int = 500, force: bool = False
     ) -> list[dict]:
-        """Return nodes still on the large-model fallback that need LLM enrichment."""
+        """Return nodes on the large-model fallback that need LLM summarisation.
+
+        Normally skips functions that already have a summary — calling enrich_summaries
+        twice on the same project should be a no-op. Pass force=True to include functions
+        that already have summaries (e.g. docstring was updated and the old Claude summary
+        is now stale).
+        """
+        summary_clause = "" if force else " AND (summary IS NULL OR summary = '')"
         async with self._db.execute(
-            "SELECT id, name, signature, docstring, file FROM nodes "
-            "WHERE project_id = ? AND is_external = 0 AND embedding_model = 'text-embedding-3-large' LIMIT ?",
+            f"SELECT id, name, signature, docstring, file, summary FROM nodes "
+            f"WHERE project_id = ? AND is_external = 0"
+            f" AND embedding_model = 'text-embedding-3-large'{summary_clause} LIMIT ?",
             (project_id, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -521,8 +379,8 @@ class CallGraphDB:
             callee_id = _resolve_callee(e.callee_name, all_node_ids)
             rows.append((project_id, e.caller_id, callee_id, e.edge_type, e.file))
         await self._db.executemany(
-            "INSERT OR IGNORE INTO edges(project_id,caller_id,callee_id,edge_type,file) "
-            "VALUES(?,?,?,?,?)",
+            "INSERT INTO edges(project_id,caller_id,callee_id,edge_type,file) "
+            "VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
             rows,
         )
         await self._db.commit()
@@ -669,7 +527,7 @@ class CallGraphDB:
                FROM nodes n
                LEFT JOIN edges e ON e.callee_id = n.id AND e.project_id = n.project_id
                WHERE n.project_id = ? AND n.is_external = 1
-               GROUP BY n.id
+               GROUP BY n.id, n.name, n.module, n.signature
                ORDER BY n.module, caller_count DESC""",
             (project_id,),
         ) as cur:
@@ -729,11 +587,7 @@ class CallGraphDB:
     ) -> list[dict]:
         """Summary rows — no snapshot_json to keep response size small."""
         async with self._db.execute(
-            """SELECT id, captured_at, fingerprint_hash,
-                      json_extract(diff_json, '$.removed_symbols')  AS removed_json,
-                      json_extract(diff_json, '$.added_symbols')    AS added_json,
-                      json_extract(diff_json, '$.changed_symbols')  AS changed_json,
-                      json_extract(diff_json, '$.version_changes')  AS version_json
+            """SELECT id, captured_at, fingerprint_hash, diff_json
                FROM dependency_fingerprints
                WHERE project_id = ?
                ORDER BY captured_at DESC
@@ -745,10 +599,11 @@ class CallGraphDB:
         import json as _json
         result = []
         for row in rows:
-            removed  = _json.loads(row["removed_json"]  or "[]")
-            added    = _json.loads(row["added_json"]    or "[]")
-            changed  = _json.loads(row["changed_json"]  or "[]")
-            versions = _json.loads(row["version_json"]  or "[]")
+            diff = _json.loads(row["diff_json"] or "{}") if row["diff_json"] else {}
+            removed  = diff.get("removed_symbols", [])
+            added    = diff.get("added_symbols", [])
+            changed  = diff.get("changed_symbols", [])
+            versions = diff.get("version_changes", [])
             entry = {
                 "id": row["id"],
                 "captured_at": row["captured_at"],
@@ -777,6 +632,28 @@ class CallGraphDB:
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
+
+    async def get_library_dependents(
+        self, library_name: str, project_id: str
+    ) -> list[dict]:
+        """
+        Return all internal functions that call any symbol in the given library.
+        Answers: "if library X changes, which of my functions are exposed?"
+        """
+        async with self._db.execute(
+            """SELECT DISTINCT n.id, n.name, n.file, n.module, n.signature,
+                      COUNT(e.callee_id) AS call_count
+               FROM edges e
+               JOIN nodes n ON n.id = e.caller_id AND n.project_id = e.project_id
+               WHERE e.callee_id LIKE ?
+                 AND e.project_id = ?
+                 AND n.is_external = 0
+               GROUP BY n.id, n.name, n.file, n.module, n.signature
+               ORDER BY call_count DESC, n.module, n.name""",
+            (f"external.{library_name}.%", project_id),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     async def get_nodes_missing_docstring(
         self, project_id: str, exclude_names: set[str] | None = None
@@ -828,12 +705,20 @@ class CallGraphDB:
     async def insert_decision(self, decision: dict) -> None:
         """Insert a raw decision record into the decisions table."""
         await self._db.execute(
-            """INSERT OR REPLACE INTO decisions
+            """INSERT INTO decisions
                (id,project_id,type,description,rejected_alternatives,
                 trigger,parent_decision_id,created_at)
-               VALUES(:id,:project_id,:type,:description,:rejected_alternatives,
-                      :trigger,:parent_decision_id,:created_at)""",
-            decision,
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                   description=excluded.description,
+                   rejected_alternatives=excluded.rejected_alternatives,
+                   trigger=excluded.trigger""",
+            (
+                decision["id"], decision["project_id"], decision["type"],
+                decision["description"], decision["rejected_alternatives"],
+                decision["trigger"], decision.get("parent_decision_id"),
+                decision["created_at"],
+            ),
         )
         await self._db.commit()
 
@@ -843,7 +728,7 @@ class CallGraphDB:
         """Link a decision to a list of function IDs in decision_functions."""
         rows = [(decision_id, fid) for fid in function_ids]
         await self._db.executemany(
-            "INSERT OR IGNORE INTO decision_functions(decision_id,function_id) VALUES(?,?)",
+            "INSERT INTO decision_functions(decision_id,function_id) VALUES(?,?) ON CONFLICT DO NOTHING",
             rows,
         )
         await self._db.commit()
@@ -1233,19 +1118,118 @@ class CallGraphDB:
             decisions_since=decisions_since,
         )
 
-    async def get_project_home_data(self, project_id: str) -> dict:
+    async def get_project_home_data(
+        self, project_id: str, max_age_seconds: int = 0
+    ) -> dict:
         """
         Compute a full architectural intelligence snapshot for one project.
         All SQL — no LLM calls. Used by get_project_home MCP tool and web UI.
+
+        max_age_seconds: if > 0 and a cached result is younger than this many
+        seconds, return the cache without re-running the 8 SQL queries,
+        ArchitectureAnalyzer, and snapshot write. The hook passes 1800 (its
+        gate TTL); the MCP tool passes 300. 0 always recomputes.
         """
         import dataclasses
+        import time
         from ..analysis import ArchitectureAnalyzer
+
+        if max_age_seconds > 0:
+            cached = self._project_home_cache.get(project_id)
+            if cached and (time.monotonic() - cached[0]) < max_age_seconds:
+                return cached[1]
 
         data = await self.fetch_graph_data(project_id)
         snapshot = ArchitectureAnalyzer().snapshot(data)
+        result = dataclasses.asdict(snapshot)
         now_iso = datetime.now(timezone.utc).isoformat()
         await self._save_project_snapshot(project_id, data.current_hashes, now_iso)
-        return dataclasses.asdict(snapshot)
+
+        import time as _time
+        self._project_home_cache[project_id] = (_time.monotonic(), result)
+        return result
+
+
+    # ── Auth ───────────────────────────────────────────────────────────────
+
+    async def create_user(self, email: str, plan: str = "free") -> dict:
+        """Create a new user and return the user record."""
+        import uuid
+        user_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            "INSERT INTO users (id, email, plan, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, email, plan, now),
+        )
+        await self._db.commit()
+        return {"id": user_id, "email": email, "plan": plan, "created_at": now}
+
+    async def create_api_key(self, user_id: str, name: str = "") -> str:
+        """Create an API key for a user. Returns the raw key once — never stored."""
+        import hashlib
+        import secrets
+        import uuid
+        raw_key = secrets.token_urlsafe(32)
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            "INSERT INTO api_keys (id, user_id, key_hash, name, created_at) VALUES (?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), user_id, key_hash, name, now),
+        )
+        await self._db.commit()
+        return raw_key
+
+    async def get_user_by_key(self, raw_key: str) -> dict | None:
+        """Look up the user for a raw API key. Returns user dict or None."""
+        import hashlib
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._db.execute(
+            """SELECT u.id, u.email, u.plan, u.created_at
+               FROM api_keys k JOIN users u ON u.id = k.user_id
+               WHERE k.key_hash = ?""",
+            (key_hash,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        await self._db.execute(
+            "UPDATE api_keys SET last_used = ? WHERE key_hash = ?",
+            (now, key_hash),
+        )
+        await self._db.commit()
+        return dict(row)
+
+    async def check_project_access(
+        self, user_id: str, project_id: str, operation: str
+    ) -> bool:
+        """Return True if user_id may perform operation on project_id.
+
+        Demo projects: any authenticated user may read; write is denied.
+        Private projects: owner role allows read and write; viewer allows read only.
+        """
+        async with self._db.execute(
+            "SELECT 1 FROM demo_projects WHERE project_id = ?", (project_id,)
+        ) as cur:
+            is_demo = await cur.fetchone() is not None
+
+        if is_demo:
+            return operation == "read"
+
+        async with self._db.execute(
+            "SELECT role FROM project_access WHERE user_id = ? AND project_id = ?",
+            (user_id, project_id),
+        ) as cur:
+            row = await cur.fetchone()
+
+        if not row:
+            return False
+        role = row["role"]
+        if role == "owner":
+            return True
+        if role == "viewer":
+            return operation == "read"
+        return False
 
 
 def _resolve_callee(callee_name: str, all_ids: set[str]) -> str:

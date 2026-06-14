@@ -9,6 +9,7 @@ wrong behaviour causes a missed failure signal.
 """
 import pytest
 from src.dependency_fingerprint import (
+    DependencyChecker,
     DependencyFingerprint,
     DependencyFingerprinter,
     FingerprintDiff,
@@ -410,3 +411,63 @@ class TestRealWorldScenario:
         assert any(s["id"] == "external.pandas.DataFrame" for s in diff.added_symbols)
         assert any(s["id"] == "external.mylib.helper" for s in diff.removed_symbols)
         assert diff.has_changes is True
+
+
+# ── DependencyChecker.health_envelope() ──────────────────────────────────────
+
+class TestHealthEnvelope:
+    def _payload(self, library: str, version: str, removed=(), changed=(), added=()):
+        return {
+            "libraries": {
+                library: {"version": version, "symbols": [{"id": f"external.{library}.fn", "signature": f"{library}.fn(...)", "caller_count": 1}]}
+            },
+            "diff_from_previous": {
+                "removed_symbols": list(removed),
+                "added_symbols":   list(added),
+                "changed_symbols": list(changed),
+                "version_changes": [],
+            }
+        }
+
+    def test_version_extracted_from_payload(self):
+        payload = self._payload("requests", "2.31.0")
+        result = DependencyChecker().health_envelope("requests", [], payload)
+        assert result["version"] == "2.31.0"
+
+    def test_dependents_passed_through(self):
+        deps = [{"id": "src.server.fn", "name": "fn", "call_count": 3}]
+        result = DependencyChecker().health_envelope("requests", deps, None)
+        assert result["dependent_count"] == 1
+        assert result["dependents"] == deps
+
+    def test_no_payload_returns_unknown_version(self):
+        result = DependencyChecker().health_envelope("requests", [], None)
+        assert result["version"] == "unknown"
+        assert result["symbols"] == []
+        assert result["recent_changes"] == {}
+
+    def test_removed_symbols_filtered_to_library(self):
+        payload = self._payload("requests", "2.31.0",
+            removed=[
+                {"library": "requests", "id": "external.requests.post", "signature": "requests.post(...)"},
+                {"library": "numpy",    "id": "external.numpy.array",   "signature": "numpy.array(...)"},
+            ]
+        )
+        result = DependencyChecker().health_envelope("requests", [], payload)
+        removed = result["recent_changes"]["removed_symbols"]
+        assert len(removed) == 1
+        assert removed[0]["id"] == "external.requests.post"
+
+    def test_other_library_changes_not_in_envelope(self):
+        payload = self._payload("requests", "2.31.0",
+            changed=[{"library": "numpy", "id": "external.numpy.array",
+                      "old_signature": "old", "new_signature": "new"}]
+        )
+        result = DependencyChecker().health_envelope("requests", [], payload)
+        assert result["recent_changes"]["changed_symbols"] == []
+
+    def test_empty_diff_produces_empty_recent_changes(self):
+        payload = self._payload("requests", "2.31.0")
+        payload["diff_from_previous"] = None
+        result = DependencyChecker().health_envelope("requests", [], payload)
+        assert result["recent_changes"] == {}

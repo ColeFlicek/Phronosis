@@ -119,7 +119,7 @@ class ScipImporter:
                 ))
 
                 for rel in sym.get("relationships", []):
-                    if not (rel.get("isReference") or rel.get("isImplementation")):
+                    if not rel.get("isReference"):
                         continue
                     callee_sym = rel.get("symbol", "")
                     if not callee_sym:
@@ -144,7 +144,7 @@ class ScipImporter:
                                 file=f"<{lib}>",
                                 module=f"external.{lib}",
                                 type="function",
-                                signature=callee_sym[:400],
+                                signature=_normalise_external_signature(callee_sym),
                                 body="",
                                 docstring="",
                                 body_hash=hashlib.sha256(callee_sym.encode()).hexdigest()[:16],
@@ -186,9 +186,12 @@ def _scip_name(symbol: str) -> str:
     # Take the descriptor (last space-separated segment)
     parts = symbol.split(" ")
     descriptor = parts[-1] if len(parts) > 1 else symbol
-    # Strip trailing punctuation and split on hierarchy separators
     descriptor = descriptor.rstrip(".")
-    for sep in ("#", "/", ".", "`"):
+    # Strip backticks first so "`array`()" becomes "array()" before splitting.
+    # Then split on hierarchy separators in priority order: # (method), /
+    # (path), : (file:symbol boundary), . (dotted path).
+    descriptor = descriptor.replace("`", "")
+    for sep in ("#", "/", ":", "."):
         if sep in descriptor:
             descriptor = descriptor.rsplit(sep, 1)[-1]
     return descriptor.strip("()") or "unknown"
@@ -199,6 +202,43 @@ def _norm(name: str) -> str:
     return (name.replace("/", ".").replace("#", ".").replace("`", "")
             .replace("(", "").replace(")", "").replace(" ", "_")
             .strip(".")) or "unknown"
+
+
+def _normalise_external_signature(symbol: str) -> str:
+    """Convert a raw SCIP symbol to a human-readable Python-style call signature.
+
+    Examples:
+      'scip-python python numpy 1.23.5 numpy/`array`().'
+        → 'numpy.array(...)'
+      'scip-python python requests 2.28.0 requests/`Session`#`get`().'
+        → 'requests.Session.get(...)'
+      'scip-typescript npm react 18.0.0 src/index.ts/useState().'
+        → 'react.useState(...)'
+    """
+    lib = _library_name(symbol)
+
+    # Descriptor is the last space-separated token (the path/hierarchy part).
+    space_parts = symbol.split(" ")
+    descriptor = space_parts[-1].rstrip(".") if len(space_parts) > 1 else symbol
+
+    callable_ = descriptor.endswith("()")
+    descriptor = descriptor.rstrip("().")
+
+    if "#" in descriptor:
+        # class#method pattern — e.g. "requests/`Session`#`get`"
+        last_slash = descriptor.rfind("/")
+        class_method = descriptor[last_slash + 1:] if last_slash >= 0 else descriptor
+        class_part, method_part = class_method.split("#", 1)
+        class_name = class_part.strip("`")
+        method_name = method_part.strip("`")
+        qualified = f"{lib}.{class_name}.{method_name}"
+    else:
+        # Simple function — e.g. "numpy/`array`"
+        last_slash = descriptor.rfind("/")
+        name = descriptor[last_slash + 1:] if last_slash >= 0 else descriptor
+        qualified = f"{lib}.{name.strip('`')}"
+
+    return f"{qualified}(...)" if callable_ else qualified
 
 
 def _path_to_module(file_path: str) -> str:

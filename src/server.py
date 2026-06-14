@@ -18,12 +18,23 @@ from starlette.responses import JSONResponse
 
 from .call_graph.storage import CallGraphDB
 from .client_setup import generate_setup_script, _default_claude_home
+from .dependency_fingerprint import (
+    DependencyChecker,
+    DependencyFingerprint,
+    DependencyFingerprinter,
+    fingerprint_from_row,
+    fingerprint_payload,
+)
 from .contracts.manager import ContractManager
 from .decision_memory.memory import DecisionMemory
 from .embeddings.embedder import EmbeddingStore
 from .embeddings.pipeline import EmbeddingPipeline
 from .indexer import Indexer, _derive_project_id
 from .web.routes import register_routes
+from .auth import AuthMiddleware, set_auth_db, get_current_user, check_permission
+from .email_sender import get_email_sender
+from . import queue as _queue_mod
+from .jobs import run_index_project, run_enrich_summaries, run_reembed_project
 
 # ── Service container ──────────────────────────────────────────────────────────
 
@@ -35,6 +46,7 @@ class Services:
     decisions: DecisionMemory
     indexer: Indexer
     contracts: ContractManager
+    checker: DependencyChecker
 
 
 _services: Services | None = None
@@ -59,6 +71,7 @@ async def _get_services() -> Services:
         _services = Services(
             db=db, embeddings=embeddings, pipeline=pipeline,
             decisions=decisions, indexer=indexer, contracts=contracts,
+            checker=DependencyChecker(),
         )
     return _services
 
@@ -68,6 +81,7 @@ async def lifespan(server: FastMCP):
     """FastMCP lifespan — initialize all services on startup and close DB on shutdown."""
     from .file_watcher import start_file_watcher
     svcs = await _get_services()
+    set_auth_db(svcs.db)
     watcher_task = await start_file_watcher(svcs.db, svcs.indexer)
     yield
     watcher_task.cancel()
@@ -82,7 +96,8 @@ async def lifespan(server: FastMCP):
 # ── FastMCP server ────────────────────────────────────────────────────────────
 
 mcp = FastMCP("acip", lifespan=lifespan)
-register_routes(mcp, _get_services)
+mcp.add_middleware(AuthMiddleware)
+register_routes(mcp, _get_services, email_sender=get_email_sender())
 
 
 # ── Project tools ─────────────────────────────────────────────────────────────
@@ -112,8 +127,25 @@ async def index_project(path: str, project_id: str = "") -> str:
     derived from the last path component.
     """
     svcs = await _get_services()
-    result = await svcs.indexer.index_project(path, project_id=project_id)
-    return json.dumps(result)
+    pid = project_id or Path(path).name or "default"
+    await check_permission(get_current_user(), pid, "write", svcs.db)
+    user = get_current_user()
+    user_id = user["id"] if user else "anon"
+    rate_key = f"acip:user_job:{user_id}"
+    q = _queue_mod.get_queue()
+    existing_job_id = q.connection.get(rate_key)
+    if existing_job_id:
+        existing_job_id = existing_job_id.decode()
+        try:
+            from rq.job import Job, JobStatus
+            existing = Job.fetch(existing_job_id, connection=q.connection)
+            if existing.get_status() in (JobStatus.QUEUED, JobStatus.STARTED):
+                return json.dumps({"status": "rate_limited", "job_id": existing_job_id})
+        except Exception:
+            pass
+    job = q.enqueue(run_index_project, path, pid, job_timeout=3600)
+    q.connection.set(rate_key, job.id, ex=3600)
+    return json.dumps({"job_id": job.id, "status": "queued"})
 
 
 @mcp.tool()
@@ -133,6 +165,8 @@ async def index_changes(
     derived from project_root's last component.
     """
     svcs = await _get_services()
+    pid = project_id or (_derive_project_id(project_root) if project_root else "default")
+    await check_permission(get_current_user(), pid, "write", svcs.db)
     result = await svcs.indexer.index_changes(
         file_paths, file_contents, project_root=project_root, project_id=project_id
     )
@@ -158,12 +192,16 @@ async def reembed_project(project_id: str) -> str:
     enrich_summaries(project_id) to upgrade undocumented functions to LLM-quality embeddings.
     """
     svcs = await _get_services()
-    result = await svcs.indexer.reembed_project(project_id)
-    return json.dumps(result)
+    await check_permission(get_current_user(), project_id, "write", svcs.db)
+    q = _queue_mod.get_queue()
+    job = q.enqueue(run_reembed_project, project_id, job_timeout=3600)
+    return json.dumps({"job_id": job.id, "status": "queued"})
 
 
 @mcp.tool()
-async def enrich_summaries(project_id: str, limit: int = 500) -> str:
+async def enrich_summaries(
+    project_id: str, limit: int = 500, force: bool = False
+) -> str:
     """
     Generate LLM summaries for functions that were embedded using the large-model fallback
     (i.e., functions with no docstring or leading comment), then re-embed them with the
@@ -172,12 +210,21 @@ async def enrich_summaries(project_id: str, limit: int = 500) -> str:
     This is intentionally user-initiated — it costs Anthropic API tokens (~$0.30 per 1,000
     functions) and may take several minutes for large batches.
 
+    Calling enrich_summaries repeatedly without force=True is safe and cheap — functions
+    that already have a summary are skipped automatically.
+
+    force: if True, re-summarize and re-embed even functions that already have a Claude
+    summary. Use this after significant docstring or comment improvements where the old
+    summary may be stale. Without force, already-summarized functions are skipped.
+
     project_id: the project to enrich (must match the value used in index_project).
     limit: max functions to process in this call. Call repeatedly to enrich all functions.
     """
     svcs = await _get_services()
-    result = await svcs.pipeline.enrich_summaries(project_id, limit=limit)
-    return json.dumps(result)
+    await check_permission(get_current_user(), project_id, "write", svcs.db)
+    q = _queue_mod.get_queue()
+    job = q.enqueue(run_enrich_summaries, project_id, limit, force, job_timeout=7200)
+    return json.dumps({"job_id": job.id, "status": "queued"})
 
 
 @mcp.tool()
@@ -266,9 +313,7 @@ async def get_dependency_fingerprint(project_id: str) -> str:
     if not row:
         return json.dumps({"status": "no fingerprint", "project_id": project_id,
                            "hint": "Run index_project to capture the first fingerprint."})
-    result = json.loads(row["snapshot_json"])
-    result["diff_from_previous"] = json.loads(row["diff_json"]) if row["diff_json"] else None
-    return json.dumps(result)
+    return json.dumps(fingerprint_payload(row))
 
 
 @mcp.tool()
@@ -306,8 +351,87 @@ async def get_dependency_fingerprint_at(fingerprint_id: str) -> str:
     row = await svcs.db.get_dependency_fingerprint_by_id(fingerprint_id)
     if not row:
         return json.dumps({"status": "not found", "fingerprint_id": fingerprint_id})
-    result = json.loads(row["snapshot_json"])
-    result["diff_from_previous"] = json.loads(row["diff_json"]) if row["diff_json"] else None
+    return json.dumps(fingerprint_payload(row))
+
+
+@mcp.tool()
+async def get_library_dependents(library_name: str, project_id: str) -> str:
+    """
+    [EXECUTION TOOL — accepts a library name and project_id]
+
+    Return all internal functions that call any symbol in the given external
+    library. Answers: "if library X changes, which of my functions are exposed?"
+
+    Each result includes the internal function's name, file, module, signature,
+    and call_count — how many distinct library symbols it calls.
+
+    Useful for migration planning ("what do I need to touch to replace requests
+    with httpx?") and for scoping the blast radius of a dependency upgrade.
+
+    library_name: bare library name, e.g. "requests", "numpy", "fastapi".
+    project_id: required — scoped to a single project.
+    """
+    svcs = await _get_services()
+    results = await svcs.db.get_library_dependents(library_name, project_id)
+    return json.dumps(results)
+
+
+@mcp.tool()
+async def compare_dependency_fingerprints(
+    fingerprint_id_a: str, fingerprint_id_b: str
+) -> str:
+    """
+    [EXECUTION TOOL — accepts two fingerprint IDs]
+
+    Diff two dependency fingerprints from any point in history. Returns the
+    same diff structure as get_dependency_fingerprint but between arbitrary
+    snapshots rather than against the previous one.
+
+    Use this to answer: "what exactly changed between the last known-good deploy
+    and the deploy where the failure appeared?"
+
+    Get fingerprint IDs from list_dependency_fingerprint_history. The diff is
+    computed as (a → b): symbols in b that weren't in a are "added", symbols in
+    a that aren't in b are "removed".
+    """
+    svcs = await _get_services()
+    row_a = await svcs.db.get_dependency_fingerprint_by_id(fingerprint_id_a)
+    row_b = await svcs.db.get_dependency_fingerprint_by_id(fingerprint_id_b)
+    if not row_a:
+        return json.dumps({"status": "not found", "fingerprint_id": fingerprint_id_a})
+    if not row_b:
+        return json.dumps({"status": "not found", "fingerprint_id": fingerprint_id_b})
+    fp_a = fingerprint_from_row(row_a)
+    fp_b = fingerprint_from_row(row_b)
+    diff = DependencyFingerprinter().diff(fp_a, fp_b)
+    return json.dumps({
+        "from": {"id": fingerprint_id_a, "captured_at": fp_a.captured_at, "hash": fp_a.fingerprint_hash},
+        "to":   {"id": fingerprint_id_b, "captured_at": fp_b.captured_at, "hash": fp_b.fingerprint_hash},
+        "diff": diff.to_dict(),
+        "has_changes": diff.has_changes,
+    })
+
+
+@mcp.tool()
+async def check_dependency(library_name: str, project_id: str) -> str:
+    """
+    [DISCOVERY TOOL — accepts a library name and project_id]
+
+    Full dependency health check for a single library. Returns in one call:
+    - version: installed version from the latest fingerprint (or "unknown")
+    - symbols: all external symbols ACIP has seen from this library
+    - dependents: internal functions that call into this library, with call_count
+    - recent_changes: version or symbol changes from the latest fingerprint diff
+
+    This is the single-call answer to "is this dependency safe?" — combine with
+    list_dependency_fingerprint_history to see the full change history.
+    """
+    svcs = await _get_services()
+    dependents = await svcs.db.get_library_dependents(library_name, project_id)
+    fp_row = await svcs.db.get_latest_dependency_fingerprint(project_id)
+    payload = fingerprint_payload(fp_row) if fp_row else None
+    result = svcs.checker.health_envelope(library_name, dependents, payload)
+    result["project_id"] = project_id
     return json.dumps(result)
 
 
@@ -359,6 +483,7 @@ async def log_decision(
     project_id: project this decision belongs to (default: "default")
     """
     svcs = await _get_services()
+    await check_permission(get_current_user(), project_id, "write", svcs.db)
     result = await svcs.decisions.log_decision(
         type=type,
         description=description,
@@ -509,7 +634,7 @@ async def get_project_home(project_id: str) -> str:
     Read() only for exact implementation of the function you are about to modify.
     """
     svcs = await _get_services()
-    result = await svcs.db.get_project_home_data(project_id)
+    result = await svcs.db.get_project_home_data(project_id, max_age_seconds=300)
     return json.dumps(result)
 
 
@@ -986,7 +1111,7 @@ async def http_project_home(request: Request) -> JSONResponse:
     try:
         project_id = request.path_params["project_id"]
         svcs = await _get_services()
-        result = await svcs.db.get_project_home_data(project_id)
+        result = await svcs.db.get_project_home_data(project_id, max_age_seconds=1800)
         return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)

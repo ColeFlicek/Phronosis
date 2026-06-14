@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acip-worker
+  namespace: acip
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: acip-worker
+  template:
+    metadata:
+      labels:
+        app: acip-worker
+    spec:
+      containers:
+        - name: acip-worker
+          image: ghcr.io/coleflicek/acip:latest  # same image as API
+          command: ["python", "-m", "src.worker"]
+          envFrom:
+            - secretRef:
+                name: acip-secrets
+            - configMapRef:
+                name: acip-config
+          resources:
+            requests:
+              memory: "512Mi"   # indexing is memory-hungry
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"

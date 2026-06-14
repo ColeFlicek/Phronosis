@@ -1,0 +1,93 @@
+# Self-hosted Postgres with pgvector for development / small deployments.
+# For production, prefer a managed database (Hetzner Managed DB or DO Managed Postgres)
+# and remove this file — just update DATABASE_URL in secrets.yaml.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: acip
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-svc
+  namespace: acip
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None  # headless — direct pod DNS
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: acip
+spec:
+  serviceName: postgres-svc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg17
+          env:
+            - name: POSTGRES_USER
+              value: acip
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: acip-secrets
+                  key: POSTGRES_PASSWORD
+                  optional: true
+            - name: POSTGRES_DB
+              value: acip
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+            - name: schema
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: schema
+          configMap:
+            name: postgres-schema
+---
+# Mount schema.sql as a ConfigMap so Postgres initialises it on first start.
+# Apply after running: kubectl create configmap postgres-schema --from-file=schema.sql -n acip
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-schema
+  namespace: acip
+# data is populated by k8s/README.md setup command:
+#   kubectl create configmap postgres-schema \
+#     --from-file=00-init.sql=k8s/postgres-init.sql \
+#     --from-file=01-schema.sql=schema.sql \
+#     -n acip --dry-run=client -o yaml | kubectl apply -f -
+# Files are applied alphabetically — 00-init.sql runs before 01-schema.sql.

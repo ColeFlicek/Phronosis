@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     nodejs \
     npm \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install LSP servers for TypeScript/JS and Python type checking
@@ -25,6 +26,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
+COPY schema.sql .
 
 EXPOSE 3004
 
