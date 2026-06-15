@@ -174,8 +174,8 @@ async def test_jobs_endpoint_returns_404_for_unknown_job(db, monkeypatch):
 # ── Per-user rate limiting ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_second_index_job_rejected_while_first_queued(db, redis_conn, monkeypatch):
-    """A user with an active indexing job gets 429 on a second request."""
+async def test_index_job_rejected_when_queue_depth_limit_reached(db, redis_conn, monkeypatch):
+    """Jobs beyond _USER_QUEUE_DEPTH_LIMIT are rejected; jobs under the limit are accepted."""
     set_auth_db(db)
     monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
 
@@ -183,12 +183,12 @@ async def test_second_index_job_rejected_while_first_queued(db, redis_conn, monk
         "INSERT INTO users (id, email, plan, created_at) VALUES (?, ?, ?, ?)",
         ("u2", "bob@example.com", "paid", "2026-01-01T00:00:00"),
     )
-    await db._db.execute(  # FK requires user to exist first
+    await db._db.execute(
         "INSERT INTO project_access (user_id, project_id, role) VALUES (?, ?, ?)",
         ("u2", "repo-a", "owner"),
     )
 
-    from src.server import Services
+    from src.server import Services, _USER_QUEUE_DEPTH_LIMIT
     from src.dependency_fingerprint import DependencyChecker
     from src import queue as queue_mod
 
@@ -205,12 +205,17 @@ async def test_second_index_job_rejected_while_first_queued(db, redis_conn, monk
          patch("src.server.get_current_user", return_value={"id": "u2", "email": "bob@example.com"}):
 
         from src.server import index_project
-        result1 = json.loads(await index_project("/some/path", "repo-a"))
-        result2 = json.loads(await index_project("/some/path", "repo-a"))
 
-    assert result1["status"] == "queued"
-    assert result2["status"] == "rate_limited"
-    assert "job_id" in result2  # returns existing job_id
+        # Fill up to the limit — all should be accepted.
+        results = []
+        for _ in range(_USER_QUEUE_DEPTH_LIMIT):
+            results.append(json.loads(await index_project("/some/path", "repo-a")))
+
+        # One more should be rejected.
+        over_limit = json.loads(await index_project("/some/path", "repo-a"))
+
+    assert all(r["status"] == "queued" for r in results)
+    assert over_limit["status"] == "rate_limited"
 
 
 @pytest.mark.asyncio
