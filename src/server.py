@@ -95,7 +95,7 @@ async def lifespan(server: FastMCP):
 # ── FastMCP server ────────────────────────────────────────────────────────────
 
 mcp = FastMCP("acip", lifespan=lifespan)
-mcp.add_middleware(AuthMiddleware)
+mcp.add_middleware(AuthMiddleware())
 register_routes(mcp, _get_services, email_sender=get_email_sender())
 
 

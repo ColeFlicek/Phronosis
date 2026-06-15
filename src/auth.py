@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 from contextvars import ContextVar
+from typing import Any
 
+from fastmcp.server.dependencies import get_http_request
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from starlette.exceptions import HTTPException
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 from .call_graph.storage import CallGraphDB
 
@@ -27,17 +29,23 @@ def get_current_user() -> dict | None:
     return _current_user.get()
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
+class AuthMiddleware(Middleware):
     """Resolve X-API-Key header to a user and store in request context."""
 
-    async def dispatch(self, request: Request, call_next):
-        raw_key = request.headers.get("X-API-Key")
+    async def on_message(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        raw_key = None
+        with contextlib.suppress(Exception):
+            raw_key = get_http_request().headers.get("X-API-Key")
         user = None
         if raw_key and _auth_db is not None:
             user = await _auth_db.get_user_by_key(raw_key)
         token = _current_user.set(user)
         try:
-            return await call_next(request)
+            return await call_next(context)
         finally:
             _current_user.reset(token)
 
