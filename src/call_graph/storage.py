@@ -1063,7 +1063,7 @@ class CallGraphDB:
 
         async with db.execute(
             """SELECT d.id, d.type, d.description, d.created_at,
-                      GROUP_CONCAT(df.function_id) AS function_ids
+                      STRING_AGG(df.function_id, ',') AS function_ids
                FROM decisions d
                LEFT JOIN decision_functions df ON df.decision_id = d.id
                WHERE d.project_id = ?
@@ -1091,7 +1091,7 @@ class CallGraphDB:
             """SELECT COUNT(*) FROM contract_violations cv
                JOIN contracts c ON c.id = cv.contract_id
                WHERE cv.project_id = ?
-               AND cv.detected_at > datetime('now', '-7 days')""",
+               AND cv.detected_at > NOW() - INTERVAL '7 days'""",
             (project_id,),
         ) as cur:
             recent_violation_count: int = (await cur.fetchone())[0]
