@@ -407,6 +407,7 @@ class Indexer:
 
         if updated_nodes:
             await self._db.upsert_nodes(updated_nodes, project_id)
+            new_node_ids = {n.id for n in updated_nodes}
             surviving = {nid: s for nid, s in existing_summaries.items() if nid in new_node_ids}
             if surviving:
                 await self._db.batch_update_summaries(surviving, project_id)

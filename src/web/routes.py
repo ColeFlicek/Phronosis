@@ -209,7 +209,7 @@ def register_routes(
                 "provider": embeddings._provider,
                 "model": embeddings._model,
                 "dimensions": embeddings._dim,
-                "storage": "sqlite-vec",
+                "storage": "pgvector",
             }
         except Exception as exc:
             result["server"] = {"status": "error", "error": str(exc)}
