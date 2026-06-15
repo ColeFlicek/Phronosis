@@ -123,43 +123,31 @@ jobs:
 
       # ── ConfigMaps ─────────────────────────────────────────────────────────
       - name: Apply ConfigMaps
-        run: |
-          kubectl apply -f k8s/configmap.yaml
-          kubectl create configmap postgres-schema \
-            --from-file=00-init.sql=k8s/postgres-init.sql \
-            --from-file=01-schema.sql=schema.sql \
-            -n acip --dry-run=client -o yaml | kubectl apply -f -
+        run: kubectl apply -f k8s/configmap.yaml
 
       # ── Secrets from GitHub Actions secrets ───────────────────────────────
       # Required secrets (set in repo Settings → Secrets → Actions):
-      #   KUBECONFIG          - base64-encoded kubeconfig for your home server
-      #   POSTGRES_PASSWORD   - password for the in-cluster Postgres
+      #   KUBECONFIG          - base64-encoded kubeconfig for your cluster
+      #   DATABASE_URL        - full postgres DSN (external DB, not in-cluster)
+      #                         TheHive:    postgresql://acip:<pw>@172.21.0.1/acip
+      #                         Production: postgresql://acip:<pw>@<managed-host>/acip
       #   OPENAI_API_KEY      - for embeddings
       #   ANTHROPIC_API_KEY   - for LLM enrichment
       #   RESEND_API_KEY      - for email (optional, leave blank to disable)
       #
-      # DATABASE_URL and REDIS_URL are derived from in-cluster service names:
-      #   postgresql://acip:<POSTGRES_PASSWORD>@postgres-svc.acip.svc.cluster.local/acip
+      # Redis stays in-cluster (stateless cache, cheap to lose):
       #   redis://redis-svc.acip.svc.cluster.local:6379
       - name: Apply secrets
         run: |
           kubectl create secret generic acip-secrets \
-            --from-literal=DATABASE_URL="postgresql://acip:${{ secrets.POSTGRES_PASSWORD }}@postgres-svc.acip.svc.cluster.local/acip" \
+            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
             --from-literal=REDIS_URL="redis://redis-svc.acip.svc.cluster.local:6379" \
-            --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
             --from-literal=OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
             --from-literal=ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
             --from-literal=RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
             -n acip --dry-run=client -o yaml | kubectl apply -f -
 
-      # ── Postgres (StatefulSet — wait for ready before API starts) ─────────
-      - name: Deploy Postgres
-        run: kubectl apply -f k8s/postgres.yaml
-
-      - name: Wait for Postgres
-        run: kubectl rollout status statefulset/postgres -n acip --timeout=3m
-
-      # ── Redis ──────────────────────────────────────────────────────────────
+      # ── Redis (in-cluster — stateless cache, survives empty on restart) ───
       - name: Deploy Redis
         run: kubectl apply -f k8s/redis.yaml
 
