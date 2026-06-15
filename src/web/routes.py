@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Awaitable, Callable
 
@@ -208,7 +209,8 @@ def register_routes(
     async def api_health(request: Request) -> JSONResponse:
         """Return a lightweight health check result for all three Phronosis layers."""
         result: dict = {}
-        try:
+
+        async def _check() -> None:
             svcs = await get_services()
             db = svcs.db
             embeddings = svcs.embeddings
@@ -245,7 +247,13 @@ def register_routes(
                 "dimensions": embeddings._dim,
                 "storage": "pgvector",
             }
+
+        try:
+            await asyncio.wait_for(_check(), timeout=5.0)
+        except asyncio.TimeoutError:
+            result["server"] = {"status": "error", "error": "health check timed out (DB unreachable?)"}
         except Exception as exc:
             result["server"] = {"status": "error", "error": str(exc)}
 
-        return JSONResponse(result)
+        status_code = 200 if "server" not in result else 503
+        return JSONResponse(result, status_code=status_code)

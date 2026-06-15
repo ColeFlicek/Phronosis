@@ -141,7 +141,15 @@ class CallGraphDB:
             await register_vector(conn)
 
         self._pool = await asyncpg.create_pool(
-            self._dsn, min_size=2, max_size=10, init=_init_conn
+            self._dsn,
+            min_size=2,
+            max_size=10,
+            init=_init_conn,
+            # Recycle idle connections every 5 minutes so stale connections
+            # after a Postgres restart are replaced rather than hanging indefinitely.
+            max_inactive_connection_lifetime=300.0,
+            # Per-query timeout so a hung query never blocks indefinitely.
+            command_timeout=30.0,
         )
         self._db = _DB(self._pool)
         schema = _SCHEMA_SQL.read_text()
@@ -172,12 +180,9 @@ class CallGraphDB:
         async with self._db.execute(
             """
             SELECT p.id, p.name, p.root, p.created_at, p.last_indexed,
-                   COUNT(DISTINCT n.id)           AS node_count,
-                   COUNT(DISTINCT e.id)           AS edge_count
+                   (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count,
+                   (SELECT COUNT(*) FROM edges e WHERE e.project_id = p.id) AS edge_count
             FROM projects p
-            LEFT JOIN nodes n ON n.project_id = p.id
-            LEFT JOIN edges e ON e.project_id = p.id
-            GROUP BY p.id
             ORDER BY p.created_at
             """
         ) as cur:

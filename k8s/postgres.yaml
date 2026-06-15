@@ -45,6 +45,15 @@ spec:
       containers:
         - name: postgres
           image: pgvector/pgvector:pg17
+          args:
+            - "-c"
+            - "max_connections=50"
+            - "-c"
+            - "shared_buffers=256MB"
+            - "-c"
+            - "work_mem=8MB"
+            - "-c"
+            - "maintenance_work_mem=64MB"
           env:
             - name: POSTGRES_USER
               value: phronosis
@@ -65,10 +74,10 @@ spec:
               mountPath: /docker-entrypoint-initdb.d
           resources:
             requests:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "250m"
             limits:
-              memory: "1Gi"
+              memory: "2Gi"
               cpu: "1000m"
       volumes:
         - name: pgdata
