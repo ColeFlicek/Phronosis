@@ -26,6 +26,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 COPY schema.sql .
 
 EXPOSE 3004
