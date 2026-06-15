@@ -129,6 +129,14 @@ class CallGraphDB:
         """Open the asyncpg connection pool and apply schema."""
         from pgvector.asyncpg import register_vector
 
+        # Bootstrap the extension before the pool so register_vector succeeds
+        # on each connection's init callback (it does a type lookup on vector).
+        bootstrap = await asyncpg.connect(self._dsn)
+        try:
+            await bootstrap.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        finally:
+            await bootstrap.close()
+
         async def _init_conn(conn: asyncpg.Connection) -> None:
             await register_vector(conn)
 
