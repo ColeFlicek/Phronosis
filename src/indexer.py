@@ -716,11 +716,14 @@ async def _try_scip_index(
                     stderr=asyncio.subprocess.PIPE,
                     cwd=project_path,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
                 if proc.returncode != 0:
                     print(f"[indexer] scip indexer exited {proc.returncode}: {stderr.decode()[:200]}")
                     return None
-            except (asyncio.TimeoutError, Exception) as exc:
+            except asyncio.TimeoutError:
+                print("[indexer] scip indexer timed out (>300s) — skipping SCIP for this project")
+                return None
+            except Exception as exc:
                 print(f"[indexer] scip indexer failed: {exc}")
                 return None
 
