@@ -13,8 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # SCIP indexers — compiler-accurate call graphs (primary structural layer).
 # scip-python was previously broken: pip install scip-python does not exist on
 # PyPI. The correct package is @sourcegraph/scip-python on npm.
-# scip CLI converts .scip binary → JSON for ScipImporter.
-RUN npm install -g @sourcegraph/scip-python @sourcegraph/scip 2>/dev/null || true
+RUN npm install -g @sourcegraph/scip-python
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
