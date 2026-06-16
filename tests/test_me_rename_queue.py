@@ -202,6 +202,13 @@ async def test_rename_endpoint_updates_name_and_returns_200(db):
 
 # ── Queue depth limiting (_check_and_enqueue) ──────────────────────────────────
 
+_fakeredis_mark = pytest.mark.skipif(
+    not __import__("importlib").util.find_spec("fakeredis"),
+    reason="fakeredis not installed — pip install fakeredis to run queue depth tests"
+)
+
+
+@_fakeredis_mark
 @pytest.mark.asyncio
 async def test_queue_depth_allows_jobs_under_limit(monkeypatch):
     import fakeredis
@@ -225,6 +232,7 @@ async def test_queue_depth_allows_jobs_under_limit(monkeypatch):
     assert fake_redis.zcard("phronosis:user_queue_depth:user-1") == 1
 
 
+@_fakeredis_mark
 @pytest.mark.asyncio
 async def test_queue_depth_blocks_at_limit(monkeypatch):
     import fakeredis
@@ -252,6 +260,7 @@ async def test_queue_depth_blocks_at_limit(monkeypatch):
         server_mod._check_and_enqueue("user-2", noop, job_timeout=3600)
 
 
+@_fakeredis_mark
 @pytest.mark.asyncio
 async def test_queue_depth_does_not_count_finished_jobs(monkeypatch):
     import fakeredis

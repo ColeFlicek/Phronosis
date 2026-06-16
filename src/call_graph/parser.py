@@ -354,18 +354,26 @@ def _extract_python_docstring(func_node: "Node", source: bytes) -> str:
 
 
 def _extract_python_leading_comment(func_node: "Node", source: bytes) -> str:
-    """Extract consecutive # comment lines at the top of a function body (before any real code)."""
-    block = next((c for c in func_node.children if c.type == "block"), None)
-    if not block:
-        return ""
+    """Extract consecutive # comment lines before the function block.
+
+    Tree-sitter places standalone comment lines between the colon and the block
+    as direct children of function_definition, not inside the block itself:
+
+        function_definition
+            def | identifier | parameters | :
+            comment   ← here, not inside block
+            comment
+            block
+                ...
+
+    We collect all comment children that appear before the block node.
+    """
     lines = []
-    for child in block.children:
-        if child.type == "\n":
-            continue
+    for child in func_node.children:
+        if child.type == "block":
+            break
         if child.type == "comment":
             lines.append(_text(child, source).lstrip("# ").strip())
-        else:
-            break
     return " ".join(lines)[:500]
 
 

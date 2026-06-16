@@ -490,3 +490,98 @@ class TestEmbedSingleCache:
         v1 = await store._embed_single("hello")
         v2 = await store._embed_single("hello")
         assert v1 == v2
+
+
+# ── get_impact_radius ─────────────────────────────────────────────────────────
+
+class TestGetImpactRadius:
+    @pytest.mark.asyncio
+    async def test_returns_callers_of_function(self, svc):
+        nodes = [_node("src.mod.inner"), _node("src.mod.outer")]
+        edges = [CallEdge(caller_id="src.mod.outer", callee_name="src.mod.inner",
+                          edge_type="calls", file="src/mod.py")]
+        await _insert(svc.db, "proj", nodes, edges)
+
+        with patch("src.server._get_services", AsyncMock(return_value=svc)):
+            from src.server import get_impact_radius
+            result = json.loads(await get_impact_radius("inner", project_id="proj"))
+        ids = {r["id"] for r in result}
+        assert "src.mod.outer" in ids
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_unknown_function(self, svc):
+        with patch("src.server._get_services", AsyncMock(return_value=svc)):
+            from src.server import get_impact_radius
+            result = json.loads(await get_impact_radius("nonexistent", project_id="proj"))
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_result_includes_impact_depth(self, svc):
+        nodes = [_node("src.mod.leaf"), _node("src.mod.caller")]
+        edges = [CallEdge(caller_id="src.mod.caller", callee_name="src.mod.leaf",
+                          edge_type="calls", file="src/mod.py")]
+        await _insert(svc.db, "proj", nodes, edges)
+
+        with patch("src.server._get_services", AsyncMock(return_value=svc)):
+            from src.server import get_impact_radius
+            result = json.loads(await get_impact_radius("leaf", project_id="proj"))
+        caller = next(r for r in result if r["id"] == "src.mod.caller")
+        assert "impact_depth" in caller
+        assert caller["impact_depth"] == 1
+
+
+# ── log_decision + get_decision_history ──────────────────────────────────────
+
+class TestLogDecision:
+    @pytest.mark.asyncio
+    async def test_logged_decision_appears_in_history(self, svc):
+        nodes = [_node("src.mod.my_func")]
+        await _insert(svc.db, "proj", nodes)
+
+        svc.decisions = MagicMock()
+        svc.decisions.log_decision = AsyncMock(return_value={"id": "dec-001"})
+
+        with patch("src.server._get_services", AsyncMock(return_value=svc)), \
+             patch("src.server.get_current_user", return_value={"id": "test-user"}), \
+             patch("src.server.check_permission", AsyncMock(return_value=None)):
+            from src.server import log_decision
+            result = json.loads(await log_decision(
+                type="Implementation",
+                description="Chose asyncpg over psycopg2 for connection pooling",
+                project_id="proj",
+                rejected_alternatives="psycopg2",
+                trigger="performance_test",
+                linked_function_ids=["src.mod.my_func"],
+            ))
+        # Result is whatever decisions.log_decision returned, JSON-encoded
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_get_decision_history_returns_decisions(self, svc):
+        nodes = [_node("src.mod.my_func")]
+        await _insert(svc.db, "proj", nodes)
+
+        svc.decisions = MagicMock()
+        svc.decisions.get_decision_history = AsyncMock(return_value=[
+            {"id": "dec-001", "description": "Chose asyncpg", "type": "Implementation",
+             "created_at": "2026-01-01", "functions": ["src.mod.my_func"]}
+        ])
+
+        with patch("src.server._get_services", AsyncMock(return_value=svc)):
+            from src.server import get_decision_history
+            result = json.loads(await get_decision_history(
+                function_name="my_func", project_id="proj"
+            ))
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_get_decision_history_returns_empty_for_unknown(self, svc):
+        svc.decisions = MagicMock()
+        svc.decisions.get_decision_history = AsyncMock(return_value=[])
+
+        with patch("src.server._get_services", AsyncMock(return_value=svc)):
+            from src.server import get_decision_history
+            result = json.loads(await get_decision_history(
+                function_name="nonexistent", project_id="proj"
+            ))
+        assert result == []

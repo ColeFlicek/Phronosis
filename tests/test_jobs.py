@@ -18,6 +18,21 @@ from src.auth import set_auth_db
 TEST_REDIS_URL = "redis://localhost:6379/1"  # DB 1 — isolated from dev
 TEST_QUEUE_NAME = "phronosis-test"
 
+# Skip all Redis-dependent tests when Redis is not reachable.
+# In CI, Redis is a sidecar service and these tests run normally.
+# Locally, set REDIS_URL=redis://localhost:6379 to run them.
+def _redis_available() -> bool:
+    try:
+        Redis.from_url(TEST_REDIS_URL).ping()
+        return True
+    except Exception:
+        return False
+
+_redis_mark = pytest.mark.skipif(
+    not _redis_available(),
+    reason="Redis not available — set REDIS_URL=redis://localhost:6379 to run"
+)
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -38,6 +53,7 @@ def test_queue(redis_conn):
 
 # ── Queue module ──────────────────────────────────────────────────────────────
 
+@_redis_mark
 def test_get_redis_uses_env_var(monkeypatch):
     monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
     from src.queue import get_redis
@@ -46,6 +62,7 @@ def test_get_redis_uses_env_var(monkeypatch):
     r.close()
 
 
+@_redis_mark
 def test_get_queue_returns_rq_queue(monkeypatch):
     monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
     from src.queue import get_queue
@@ -55,6 +72,8 @@ def test_get_queue_returns_rq_queue(monkeypatch):
 
 # ── index_project dispatch ────────────────────────────────────────────────────
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_index_project_returns_job_id(db, redis_conn, monkeypatch):
     """index_project should enqueue a job and return job_id immediately."""
@@ -100,6 +119,8 @@ async def test_index_project_returns_job_id(db, redis_conn, monkeypatch):
 
 # ── GET /api/jobs/{job_id} ────────────────────────────────────────────────────
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_jobs_endpoint_returns_queued_status(db, monkeypatch):
     """GET /api/jobs/{id} returns status for a queued job."""
@@ -139,6 +160,8 @@ async def test_jobs_endpoint_returns_queued_status(db, monkeypatch):
     fake_redis.close()
 
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_jobs_endpoint_returns_404_for_unknown_job(db, monkeypatch):
     """GET /api/jobs/unknown returns 404."""
@@ -173,6 +196,8 @@ async def test_jobs_endpoint_returns_404_for_unknown_job(db, monkeypatch):
 
 # ── Per-user rate limiting ────────────────────────────────────────────────────
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_index_job_rejected_when_queue_depth_limit_reached(db, redis_conn, monkeypatch):
     """Jobs beyond _USER_QUEUE_DEPTH_LIMIT are rejected; jobs under the limit are accepted."""
@@ -218,6 +243,8 @@ async def test_index_job_rejected_when_queue_depth_limit_reached(db, redis_conn,
     assert over_limit["status"] == "rate_limited"
 
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_enrich_summaries_returns_job_id(db, redis_conn, monkeypatch):
     """enrich_summaries enqueues a job rather than blocking on LLM calls."""
@@ -256,6 +283,8 @@ async def test_enrich_summaries_returns_job_id(db, redis_conn, monkeypatch):
     assert fake_queue.count == 1
 
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_index_changes_runs_synchronously(db, monkeypatch):
     """index_changes must NOT enqueue — it returns a real result immediately."""
@@ -295,6 +324,8 @@ async def test_index_changes_runs_synchronously(db, monkeypatch):
     assert "job_id" not in result
 
 
+@_redis_mark
+@_redis_mark
 @pytest.mark.asyncio
 async def test_rate_limit_is_per_user_not_global(db, redis_conn, monkeypatch):
     """User A's active indexing job must not block user B."""
