@@ -137,23 +137,15 @@ class ScipImporter:
                     # This is a call/reference inside the current function
                     if sym_id == current_fn_sym:
                         continue  # self-reference
-                    caller_id = f"{module}.{_norm(current_fn_sym)}"
+                    # Use tree-sitter-compatible caller_id so get_callers() JOIN works.
+                    # _norm() produces a mangled ID with the full SCIP package hash; we
+                    # want module.ClassName.method or module.function instead.
+                    caller_id = _scip_sym_to_node_id(current_fn_sym, module)
                     is_internal = sym_id in internal_symbols
                     if is_internal:
-                        parts = sym_id.split(" ")
-                        callee_module = _path_to_module(
-                            parts[4] if len(parts) > 4 else (parts[-1] if parts else rel_path)
-                        )
-                        callee_id = f"{callee_module}.{_norm(sym_id)}"
-                        edge_key = (caller_id, callee_id)
-                        if edge_key not in seen_edges:
-                            seen_edges.add(edge_key)
-                            edges.append(CallEdge(
-                                caller_id=caller_id,
-                                callee_name=_scip_name(sym_id),
-                                edge_type="reference",
-                                file=file_path,
-                            ))
+                        # Tree-sitter already captures internal calls with full fidelity.
+                        # Adding SCIP duplicates here would create noise in get_callers/callees.
+                        continue
                     else:
                         # External symbol
                         lib = _library_name(sym_id)
@@ -295,6 +287,27 @@ class ScipImporter:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _scip_sym_to_node_id(sym_id: str, file_module: str) -> str:
+    """Convert a SCIP internal symbol to a tree-sitter-compatible node ID.
+
+    SCIP: 'scip-python python pkg version src/foo.py:ClassName#method().'
+    Tree-sitter: 'src.foo.ClassName.method'
+
+    This is used for edge caller_ids so that get_callers() JOINs succeed —
+    the DB JOIN requires e.caller_id to match the stored tree-sitter node id.
+    """
+    parts = sym_id.split(" ")
+    descriptor = parts[-1].rstrip(".") if len(parts) > 1 else sym_id
+    descriptor = descriptor.replace("`", "")
+    # Descriptor is "path/to/file.py:ClassOrFunc" — take the symbol part after ":"
+    sym_part = descriptor.rsplit(":", 1)[-1] if ":" in descriptor else descriptor
+    sym_part = sym_part.strip("().")
+    if "#" in sym_part:
+        class_name, method_name = sym_part.split("#", 1)
+        return f"{file_module}.{class_name}.{method_name}"
+    return f"{file_module}.{sym_part}"
+
 
 def _library_name(symbol: str) -> str:
     """Extract the library/package name from a SCIP symbol string.

@@ -77,9 +77,15 @@ class ArchitectureAnalyzer:
         for caller_id, callee_id in data.edges:
             s_from = self._subsystem(caller_id)
             s_to = self._subsystem(callee_id)
-            if s_from != s_to:
-                key = (s_from, s_to)
-                conn_counts[key] = conn_counts.get(key, 0) + 1
+            if s_from == s_to:
+                continue
+            # Exclude external library subsystems — they create O(n×m) noise in
+            # the wiring diagram because every internal module crosses every library.
+            # External dependencies are already visible via list_external_dependencies.
+            if s_from.startswith("external.") or s_to.startswith("external."):
+                continue
+            key = (s_from, s_to)
+            conn_counts[key] = conn_counts.get(key, 0) + 1
 
         return [
             {"from": k[0], "to": k[1], "edge_count": v}
