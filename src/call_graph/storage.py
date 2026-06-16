@@ -270,17 +270,18 @@ class CallGraphDB:
         import json
         rows = [
             (project_id, n.id, n.file, n.module, n.type, n.name,
-             n.signature, n.docstring, n.body_hash, json.dumps(n.decorators),
+             n.signature, n.docstring, n.body, n.body_hash, json.dumps(n.decorators),
              1 if n.is_external else 0)
             for n in nodes
         ]
         await self._db.executemany(
-            """INSERT INTO nodes(project_id,id,file,module,type,name,signature,docstring,summary,body_hash,decorators,is_external)
-               VALUES(?,?,?,?,?,?,?,?,'',?,?,?)
+            """INSERT INTO nodes(project_id,id,file,module,type,name,signature,docstring,summary,body,body_hash,decorators,is_external)
+               VALUES(?,?,?,?,?,?,?,?,'',?,?,?,?)
                ON CONFLICT(project_id,id) DO UPDATE SET
                    file=excluded.file, module=excluded.module, type=excluded.type,
                    name=excluded.name, signature=excluded.signature,
-                   docstring=excluded.docstring, body_hash=excluded.body_hash,
+                   docstring=excluded.docstring, body=excluded.body,
+                   body_hash=excluded.body_hash,
                    decorators=excluded.decorators, is_external=excluded.is_external""",
             rows,
         )

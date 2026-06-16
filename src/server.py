@@ -871,6 +871,72 @@ async def resolve_improvement(
     return json.dumps(result)
 
 
+# ── Performance detectors ─────────────────────────────────────────────────────
+
+@mcp.tool()
+async def check_performance(project_id: str) -> str:
+    """
+    Surface potential performance concerns in an indexed project.
+
+    Runs two static detectors:
+    - correlated_join_aggregate: SQL queries that JOIN two tables sharing a
+      parent key and then aggregate with COUNT — produces a row cross-product.
+      This is the class of bug that caused list_projects to hang indefinitely.
+    - n_plus_one: functions that contain a loop and call a DB-accessing
+      function inside it — O(n) queries instead of O(1).
+
+    Findings already acknowledged via dismiss_performance_concern are returned
+    with status="acknowledged" so you know they exist but chose to accept them.
+    New findings are returned with status="new".
+
+    Respond to new findings by either fixing them or calling
+    dismiss_performance_concern with the reason the pattern is intentional.
+    """
+    from .performance import check_performance as _check
+    svcs = await _get_services()
+    findings = await _check(svcs.db, project_id)
+    return json.dumps({
+        "project_id": project_id,
+        "total": len(findings),
+        "new": sum(1 for f in findings if not f.suppressed),
+        "acknowledged": sum(1 for f in findings if f.suppressed),
+        "findings": [f.to_dict() for f in findings],
+    }, indent=2)
+
+
+@mcp.tool()
+async def dismiss_performance_concern(
+    project_id: str,
+    function_id: str,
+    reason: str,
+) -> str:
+    """
+    Acknowledge a performance finding as intentional so it is not re-surfaced.
+
+    Use this when check_performance flags something you have already reviewed
+    and decided is acceptable — for example, a JOIN that looks like a
+    cross-product but is bounded by a WHERE clause you know limits the rows.
+
+    The reason is stored as a Performance decision in decision memory, linked
+    to the function. Future check_performance calls will show it with
+    status="acknowledged" and your reason, so the context is preserved.
+
+    function_id: the id field from the check_performance finding
+    reason: why this pattern is intentional or acceptable
+    """
+    svcs = await _get_services()
+    result = await svcs.decisions.log_decision(
+        type="Performance",
+        description=reason,
+        rejected_alternatives="",
+        trigger=f"dismissed via check_performance on project {project_id}",
+        linked_function_ids=[function_id],
+        parent_decision_id=None,
+        project_id=project_id,
+    )
+    return json.dumps({"status": "acknowledged", "decision_id": result.get("id")})
+
+
 # ── Query HTTP endpoints ──────────────────────────────────────────────────────
 
 @mcp.custom_route("/api/functions", methods=["POST"])
