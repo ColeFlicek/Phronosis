@@ -6,10 +6,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     libpq-dev \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
-# scip-python: Python compiler-accurate call graph (primary structural indexer)
-RUN pip install --no-cache-dir scip-python || true
+# SCIP indexers — compiler-accurate call graphs (primary structural layer).
+# scip-python was previously broken: pip install scip-python does not exist on
+# PyPI. The correct package is @sourcegraph/scip-python on npm.
+# scip CLI converts .scip binary → JSON for ScipImporter.
+RUN npm install -g @sourcegraph/scip-python @sourcegraph/scip 2>/dev/null || true
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
