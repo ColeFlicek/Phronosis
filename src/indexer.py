@@ -731,7 +731,7 @@ async def _try_scip_index(
             if os.path.exists(scip_bin):
                 try:
                     conv = await asyncio.create_subprocess_exec(
-                        "scip-python", "convert", "--from", scip_bin, "--to", "json",
+                        "scip", "convert", "--from", scip_bin, "--to", "json",
                         "--output", scip_out,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
@@ -739,7 +739,6 @@ async def _try_scip_index(
                     await asyncio.wait_for(conv.communicate(), timeout=30)
                     os.unlink(scip_bin)
                 except Exception:
-                    # Conversion failed — ScipImporter will read the binary directly if supported
                     pass
 
             if not os.path.exists(scip_out):
