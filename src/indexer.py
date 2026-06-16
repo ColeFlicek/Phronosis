@@ -682,52 +682,88 @@ async def _try_scip_index(
     except FileNotFoundError:
         return None
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        scip_out = os.path.join(tmpdir, "index.scip.json")
+    # scip-python requires a git repo. If one doesn't exist (e.g. Docker image
+    # copy without .git), init a temporary one so scip-python can discover files.
+    git_dir = os.path.join(project_path, ".git")
+    _git_inited = False
+    if not os.path.exists(git_dir):
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            init = await asyncio.create_subprocess_exec(
+                "git", "init",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
                 cwd=project_path,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            if proc.returncode != 0:
-                print(f"[indexer] scip indexer exited {proc.returncode}: {stderr.decode()[:200]}")
-                return None
-        except (asyncio.TimeoutError, Exception) as exc:
-            print(f"[indexer] scip indexer failed: {exc}")
-            return None
+            await init.wait()
+            add = await asyncio.create_subprocess_exec(
+                "git", "add", "-A",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=project_path,
+            )
+            await add.wait()
+            _git_inited = True
+        except Exception:
+            pass
 
-        # scip-python outputs index.scip; convert to JSON form for ScipImporter
-        scip_bin = os.path.join(project_path, "index.scip")
-        if os.path.exists(scip_bin):
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scip_out = os.path.join(tmpdir, "index.scip.json")
             try:
-                conv = await asyncio.create_subprocess_exec(
-                    "scip", "convert", "--from", scip_bin, "--to", "json",
-                    "--output", scip_out,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
                 )
-                await asyncio.wait_for(conv.communicate(), timeout=30)
-                # Clean up the binary .scip file
-                os.unlink(scip_bin)
-            except Exception as exc:
-                print(f"[indexer] scip convert failed: {exc}")
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                if proc.returncode != 0:
+                    print(f"[indexer] scip indexer exited {proc.returncode}: {stderr.decode()[:200]}")
+                    return None
+            except (asyncio.TimeoutError, Exception) as exc:
+                print(f"[indexer] scip indexer failed: {exc}")
                 return None
-        elif not os.path.exists(scip_out):
-            print("[indexer] scip indexer produced no output file")
-            return None
 
-        from .scip_import import ScipImporter
-        try:
-            importer = ScipImporter(project_root=project_path)
-            nodes, edges = importer.parse(scip_out)
-            print(f"[indexer] SCIP index: {len(nodes)} symbols, {len(edges)} edges")
-            return nodes, edges
-        except Exception as exc:
-            print(f"[indexer] ScipImporter failed: {exc}")
-            return None
+            # scip-python outputs index.scip; ScipImporter reads the JSON form.
+            # scip-python v0.6+ embeds the converter — the output is index.scip (binary).
+            # Try the bundled convert command first; fall back to direct binary read.
+            scip_bin = os.path.join(project_path, "index.scip")
+            if os.path.exists(scip_bin):
+                try:
+                    conv = await asyncio.create_subprocess_exec(
+                        "scip-python", "convert", "--from", scip_bin, "--to", "json",
+                        "--output", scip_out,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(conv.communicate(), timeout=30)
+                    os.unlink(scip_bin)
+                except Exception:
+                    # Conversion failed — ScipImporter will read the binary directly if supported
+                    pass
+
+            if not os.path.exists(scip_out):
+                # Check if binary output can be passed directly
+                if os.path.exists(scip_bin):
+                    scip_out = scip_bin
+                else:
+                    print("[indexer] scip indexer produced no output file")
+                    return None
+
+            from .scip_import import ScipImporter
+            try:
+                importer = ScipImporter(project_root=project_path)
+                nodes, edges = importer.parse(scip_out)
+                print(f"[indexer] SCIP index: {len(nodes)} symbols, {len(edges)} edges")
+                return nodes, edges
+            except Exception as exc:
+                print(f"[indexer] ScipImporter failed: {exc}")
+                return None
+    finally:
+        # Remove the temporary git repo if we created it
+        if _git_inited and os.path.exists(git_dir):
+            import shutil
+            shutil.rmtree(git_dir, ignore_errors=True)
 
 
 def _detect_primary_language(source_files: list[str]) -> str:
