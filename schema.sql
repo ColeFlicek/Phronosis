@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS projects (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     root         TEXT NOT NULL DEFAULT '',
+    branch       TEXT NOT NULL DEFAULT '',
+    head_commit  TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
     last_indexed TEXT
 );
@@ -59,6 +61,15 @@ CREATE TABLE IF NOT EXISTS function_embeddings (
 CREATE INDEX IF NOT EXISTS idx_femb_hnsw ON function_embeddings
     USING hnsw (embedding vector_cosine_ops);
 
+-- Content-addressable embedding cache. Keyed by body_hash so identical functions
+-- across branches share one vector — no redundant API calls or storage.
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    body_hash  TEXT PRIMARY KEY,
+    embedding  vector(1536) NOT NULL,
+    model      TEXT NOT NULL DEFAULT '',
+    cached_at  TEXT NOT NULL
+);
+
 -- Decision embeddings (shared across all projects — UUIDs, no collision risk)
 CREATE TABLE IF NOT EXISTS decision_embeddings (
     id        TEXT PRIMARY KEY,
@@ -87,6 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_df_function ON decision_functions(function_id);
 CREATE TABLE IF NOT EXISTS contracts (
     id                    TEXT PRIMARY KEY,
     project_ids           TEXT NOT NULL DEFAULT '[]',
+    function_ids          TEXT NOT NULL DEFAULT '[]',
     title                 TEXT NOT NULL,
     natural_language      TEXT NOT NULL,
     rule_type             TEXT NOT NULL DEFAULT 'SEMANTIC',

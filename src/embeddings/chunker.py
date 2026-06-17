@@ -21,6 +21,7 @@ class FunctionChunk:
     body: str           # full body, not truncated here — embedder truncates to token budget
     embed_text: str     # pre-formatted text to embed (populated by prepare_embed_text)
     summary: str = ""   # populated later by LLM
+    body_hash: str = "" # content hash — used as cache key in embedding_cache
 
 
 def extract_chunks(file_path: str, content: str, project_root: str = "") -> list[FunctionChunk]:
@@ -42,6 +43,7 @@ def _node_to_chunk(node: FunctionNode) -> FunctionChunk:
         leading_comment=node.leading_comment,
         body=node.body,
         embed_text="",
+        body_hash=node.body_hash,
     )
     return chunk
 

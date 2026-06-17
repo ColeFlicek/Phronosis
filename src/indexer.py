@@ -2,6 +2,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -17,6 +19,35 @@ from .scip_import import ScipImporter
 
 _SUPPORTED_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx"}
 
+# Calibrated from 8 demo repos (seaborn → django).
+# Regex undercounts functions by ~28% vs tree-sitter — correct with 1.3x factor.
+# Lower bound: small repos without heavy SCIP augmentation (~0.025s/fn corrected).
+# Upper bound: large Python repos with full scip-python run (~0.085s/fn corrected).
+# All 8 actuals land within this range.
+_FN_REGEX_CORRECTION = 1.3     # regex misses lambdas, nested defs, decorators
+_SECONDS_PER_FN_LOW  = 0.025   # fast case: small repo / SCIP skipped
+_SECONDS_PER_FN_HIGH = 0.085   # slow case: large repo + full scip-python run
+# Schema objects embed in a single batch call — ~0.005s per class, minimum 5s.
+_SECONDS_PER_CLASS = 0.005
+_SCHEMA_MIN_SECONDS = 5
+
+# Fast regex patterns for pre-index function count estimate — one pass, no AST.
+_FUNCTION_SCAN_RE: dict[str, re.Pattern] = {
+    ".py":  re.compile(r"^\s*(async\s+)?def\s+\w", re.MULTILINE),
+    ".ts":  re.compile(r"\bfunction\s+\w|const\s+\w+\s*=\s*(?:async\s+)?\(", re.MULTILINE),
+    ".tsx": re.compile(r"\bfunction\s+\w|const\s+\w+\s*=\s*(?:async\s+)?\(", re.MULTILINE),
+    ".js":  re.compile(r"\bfunction\s+\w|\w+\s*=\s*(?:async\s+)?(?:function\b|\()", re.MULTILINE),
+    ".jsx": re.compile(r"\bfunction\s+\w|\w+\s*=\s*(?:async\s+)?(?:function\b|\()", re.MULTILINE),
+}
+
+_CLASS_SCAN_RE: dict[str, re.Pattern] = {
+    ".py":  re.compile(r"^\s*class\s+\w", re.MULTILINE),
+    ".ts":  re.compile(r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+\w", re.MULTILINE),
+    ".tsx": re.compile(r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+\w", re.MULTILINE),
+    ".js":  re.compile(r"^\s*class\s+\w", re.MULTILINE),
+    ".jsx": re.compile(r"^\s*class\s+\w", re.MULTILINE),
+}
+
 _parser = TreeSitterParser()
 _fingerprinter = DependencyFingerprinter()
 
@@ -26,12 +57,77 @@ def _derive_project_id(path: str) -> str:
     return Path(path).name or "default"
 
 
+def estimate_project(path: str) -> dict:
+    """Fast pre-scan: count functions and classes by regex to estimate index time.
+
+    Runs in < 1s on any project size — no DB, no embedding, no tree-sitter.
+    Covers two phases: call graph + function embeddings (~0.037s/fn) and
+    schema object embeddings (~0.005s/class, min 5s).
+
+    Returns:
+        files, estimated_functions, estimated_classes, estimated_seconds,
+        breakdown: {call_graph_embedding, schema_objects}
+    """
+    source_files = _collect_source_files(path)
+    total_fns = 0
+    total_cls = 0
+    total_lines = 0
+    for fp in source_files:
+        ext = Path(fp).suffix.lower()
+        try:
+            text = Path(fp).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        total_lines += text.count("\n")
+        fn_pat = _FUNCTION_SCAN_RE.get(ext)
+        if fn_pat:
+            total_fns += len(fn_pat.findall(text))
+        cls_pat = _CLASS_SCAN_RE.get(ext)
+        if cls_pat:
+            total_cls += len(cls_pat.findall(text))
+
+    corrected_fns = int(total_fns * _FN_REGEX_CORRECTION)
+    schema_seconds = max(_SCHEMA_MIN_SECONDS, int(total_cls * _SECONDS_PER_CLASS))
+    total_low  = int(corrected_fns * _SECONDS_PER_FN_LOW)  + schema_seconds
+    total_high = int(corrected_fns * _SECONDS_PER_FN_HIGH) + schema_seconds
+
+    def _fmt(s: int) -> str:
+        return f"~{s // 60}m {s % 60}s" if s >= 60 else f"~{s}s"
+
+    return {
+        "files": len(source_files),
+        "lines": total_lines,
+        "estimated_functions": total_fns,
+        "estimated_classes": total_cls,
+        "estimated_seconds_low": total_low,
+        "estimated_seconds_high": total_high,
+        "estimated_time": f"{_fmt(total_low)} – {_fmt(total_high)}",
+        "note": "Upper bound applies if scip-python augmentation runs on a large Python repo.",
+    }
+
+
+def _detect_git_context(path: str) -> tuple[str, str]:
+    """Return (branch, head_commit) for the git repo at path. Returns ('', '') if not a git repo."""
+    try:
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, cwd=path, timeout=5,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=path, timeout=5,
+        ).stdout.strip()
+        return (branch or "", head or "")
+    except Exception:
+        return ("", "")
+
+
 class Indexer:
     def __init__(self, db: CallGraphDB, pipeline: EmbeddingPipeline) -> None:
         self._db = db
         self._pipeline = pipeline
 
-    async def index_project(self, path: str, project_id: str = "") -> dict:
+    async def index_project(self, path: str, project_id: str = "", branch: str = "") -> dict:
         """
         Full index of a project directory.
         1. Walk source files.
@@ -148,8 +244,13 @@ class Indexer:
                 existing_summaries=existing_summaries if existing_summaries else None,
             )
 
-        # Register / update project record.
-        await self._db.upsert_project(project_id, project_id, path)
+        # Register / update project record with current git context.
+        detected_branch, head_commit = _detect_git_context(path)
+        effective_branch = branch or detected_branch
+        await self._db.upsert_project(
+            project_id, project_id, path,
+            branch=effective_branch, head_commit=head_commit,
+        )
 
         internal_count = sum(1 for n in all_nodes if not n.is_external)
         result = {

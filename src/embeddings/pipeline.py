@@ -58,35 +58,44 @@ class EmbeddingPipeline:
         doc_chunks = [c for c in chunks if c.summary or c.docstring or c.leading_comment]
         raw_chunks = [c for c in chunks if not (c.summary or c.docstring or c.leading_comment)]
 
+        # Cache lookup — skip API calls for functions whose body hasn't changed
+        # across branches or re-indexes. Cache is keyed by body_hash globally.
+        async def _resolve_group(group: list[FunctionChunk], model: str, use_large: bool) -> int:
+            cache_hits, cache_misses = [], []
+            for chunk in group:
+                cached_vec = await self._store.check_embedding_cache(chunk.body_hash)
+                if cached_vec is not None:
+                    cache_hits.append((chunk, cached_vec))
+                else:
+                    cache_misses.append(chunk)
+
+            if cache_hits:
+                print(f"[embeddings] cache: {len(cache_hits)} hits, {len(cache_misses)} misses ({model})")
+            for chunk, vec in cache_hits:
+                summary = chunk.summary if not use_large else None
+                await self._db.update_node_embedding_meta(chunk.id, summary, model, project_id)
+                await self._store.upsert_vector(chunk.id, vec, project_id, body_hash=chunk.body_hash)
+
+            if cache_misses:
+                texts = [prepare_embed_text(c) for c in cache_misses]
+                embed_fn = self._store._embed_batch_large if use_large else self._store._embed_batch
+                vectors = await embed_fn(texts)
+                for chunk, vec in zip(cache_misses, vectors):
+                    summary = None if use_large else chunk.summary
+                    await self._db.update_node_embedding_meta(chunk.id, summary, model, project_id)
+                    await self._store.upsert_vector(chunk.id, vec, project_id, body_hash=chunk.body_hash)
+            return len(group)
+
         print(
             f"[embeddings] two-tier: {len(doc_chunks)} documented ({self._store._model}), "
             f"{len(raw_chunks)} undocumented ({self._store._large_model})"
         )
-
-        if doc_chunks:
-            texts = [prepare_embed_text(c) for c in doc_chunks]
-            vectors = await self._store._embed_batch(texts)
-            for chunk, vec in zip(doc_chunks, vectors):
-                await self._db.update_node_embedding_meta(
-                    chunk.id, chunk.summary, self._store._model, project_id
-                )
-                await self._store.upsert_vector(chunk.id, vec, project_id)
-
-        if raw_chunks:
-            texts = [prepare_embed_text(c) for c in raw_chunks]
-            vectors = await self._store._embed_batch_large(texts)
-            for chunk, vec in zip(raw_chunks, vectors):
-                await self._db.update_node_embedding_meta(
-                    chunk.id, None, self._store._large_model, project_id
-                )
-                await self._store.upsert_vector(chunk.id, vec, project_id)
+        doc_count = await _resolve_group(doc_chunks, self._store._model, use_large=False) if doc_chunks else 0
+        raw_count = await _resolve_group(raw_chunks, self._store._large_model, use_large=True) if raw_chunks else 0
 
         await self._db.commit()
-        print(
-            f"[embeddings] stored {len(chunks)} embeddings ok "
-            f"({len(doc_chunks)} small-model, {len(raw_chunks)} large-model)"
-        )
-        return {"docs": len(doc_chunks), "fallback": len(raw_chunks)}
+        print(f"[embeddings] stored {len(chunks)} embeddings ok ({doc_count} small-model, {raw_count} large-model)")
+        return {"docs": doc_count, "fallback": raw_count}
 
     async def enrich_summaries(
         self, project_id: str, limit: int = 500, force: bool = False

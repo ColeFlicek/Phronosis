@@ -54,24 +54,75 @@ DEMO_REPOS: list[DemoRepo] = [
         display_name="psf/requests",
         repo_url="https://github.com/psf/requests",
         description="The iconic Python HTTP library. Small, clean, and well-documented.",
+        already_indexed=True,
     ),
     DemoRepo(
         slug="flask",
         display_name="pallets/flask",
         repo_url="https://github.com/pallets/flask",
         description="Lightweight Python web framework. Classic microframework design.",
+        already_indexed=True,
     ),
     DemoRepo(
         slug="pytest",
         display_name="pytest-dev/pytest",
         repo_url="https://github.com/pytest-dev/pytest",
         description="Python testing framework. Medium-sized, plugin-heavy architecture.",
+        already_indexed=True,
     ),
     DemoRepo(
-        slug="gin",
-        display_name="gin-gonic/gin",
-        repo_url="https://github.com/gin-gonic/gin",
-        description="High-performance Go HTTP framework. Demonstrates multi-language indexing.",
+        slug="django",
+        display_name="django/django",
+        repo_url="https://github.com/django/django",
+        description="The web framework for perfectionists with deadlines. Largest SWE-bench repo.",
+    ),
+    DemoRepo(
+        slug="sympy",
+        display_name="sympy/sympy",
+        repo_url="https://github.com/sympy/sympy",
+        description="Python library for symbolic mathematics. Deep call graph across algebra, calculus, and more.",
+    ),
+    DemoRepo(
+        slug="scikit-learn",
+        display_name="scikit-learn/scikit-learn",
+        repo_url="https://github.com/scikit-learn/scikit-learn",
+        description="Machine learning in Python. Rich estimator hierarchy and pipeline architecture.",
+    ),
+    DemoRepo(
+        slug="matplotlib",
+        display_name="matplotlib/matplotlib",
+        repo_url="https://github.com/matplotlib/matplotlib",
+        description="Python 2D plotting library. Complex renderer and artist subsystem.",
+    ),
+    DemoRepo(
+        slug="astropy",
+        display_name="astropy/astropy",
+        repo_url="https://github.com/astropy/astropy",
+        description="Astronomy and astrophysics in Python. Deep domain model across units, coordinates, and I/O.",
+    ),
+    DemoRepo(
+        slug="sphinx",
+        display_name="sphinx-doc/sphinx",
+        repo_url="https://github.com/sphinx-doc/sphinx",
+        description="Python documentation generator. Extension-based architecture with rich builder hierarchy.",
+    ),
+    DemoRepo(
+        slug="xarray",
+        display_name="pydata/xarray",
+        repo_url="https://github.com/pydata/xarray",
+        description="N-dimensional labeled arrays in Python. NumPy/pandas-compatible data model.",
+    ),
+    DemoRepo(
+        slug="pylint",
+        display_name="pylint-dev/pylint",
+        repo_url="https://github.com/pylint-dev/pylint",
+        description="Python static analysis tool. Checker plugin architecture with AST traversal.",
+    ),
+    DemoRepo(
+        slug="seaborn",
+        display_name="mwaskom/seaborn",
+        repo_url="https://github.com/mwaskom/seaborn",
+        description="Statistical data visualization in Python. High-level matplotlib wrapper.",
     ),
 ]
 
@@ -80,6 +131,11 @@ DEMO_REPOS: list[DemoRepo] = [
 
 def _dsn() -> str:
     return os.getenv("DATABASE_URL", "postgresql://phronosis:phronosis@localhost/phronosis")
+
+
+async def _make_db():
+    from src.call_graph.storage import CallGraphDB
+    return await CallGraphDB.create(_dsn())
 
 
 async def _make_services():
@@ -92,7 +148,7 @@ async def _make_services():
     embeddings = await EmbeddingStore.create(db)
     pipeline = EmbeddingPipeline(db, embeddings)
     indexer = Indexer(db, pipeline)
-    return db, indexer, pipeline
+    return db, indexer, pipeline, embeddings
 
 
 async def _mark_as_demo(db, repo: DemoRepo) -> None:
@@ -100,7 +156,7 @@ async def _mark_as_demo(db, repo: DemoRepo) -> None:
     await db._db.execute(
         """INSERT INTO demo_projects
                (project_id, display_name, description, repo_url, added_at, auto_update)
-           VALUES (?, ?, ?, ?, ?, 0)
+           VALUES ($1, $2, $3, $4, $5, 0)
            ON CONFLICT (project_id) DO UPDATE SET
                display_name = excluded.display_name,
                description  = excluded.description,
@@ -110,16 +166,16 @@ async def _mark_as_demo(db, repo: DemoRepo) -> None:
     await db._db.commit()
 
 
-async def _process_repo(repo: DemoRepo, clone_dir: Path, skip_enrich: bool) -> dict:
-    db, indexer, pipeline = await _make_services()
+async def _process_repo(repo: DemoRepo, clone_dir: Path, skip_enrich: bool, yes: bool = False) -> dict:
     result = {"slug": repo.slug, "index": None, "enrich": None, "demo_marked": False}
     t0 = time.time()
 
-    try:
-        if repo.already_indexed:
+    if repo.already_indexed:
+        # Only needs DB — no embedding client required.
+        db = await _make_db()
+        try:
             projects = await db.list_projects()
             existing_ids = {p["id"] for p in projects}
-
             if repo.slug not in existing_ids and "ACIP" in existing_ids:
                 print(f"  renaming ACIP → {repo.slug}")
                 await db.rename_project("ACIP", repo.slug)
@@ -128,27 +184,55 @@ async def _process_repo(repo: DemoRepo, clone_dir: Path, skip_enrich: bool) -> d
                 return result
             else:
                 print(f"  found existing index for {repo.slug}")
+            await _mark_as_demo(db, repo)
+            result["demo_marked"] = True
+            print(f"  ✓ marked as demo in {time.time() - t0:.1f}s")
+        finally:
+            await db.close()
+        return result
+
+    # New repo — needs full services (DB + embeddings + indexer).
+    db, indexer, pipeline, embeddings = await _make_services()
+    try:
+        repo_path = clone_dir / repo.slug
+        if not repo_path.exists():
+            print(f"  cloning {repo.repo_url} …")
+            subprocess.run(
+                ["git", "clone", "--depth=1", repo.repo_url, str(repo_path)],
+                check=True, capture_output=True,
+            )
         else:
-            repo_path = clone_dir / repo.slug
-            if not repo_path.exists():
-                print(f"  cloning {repo.repo_url} …")
-                subprocess.run(
-                    ["git", "clone", "--depth=1", repo.repo_url, str(repo_path)],
-                    check=True, capture_output=True,
-                )
-            else:
-                print(f"  {repo_path} exists, skipping clone")
+            print(f"  {repo_path} exists, skipping clone")
 
-            print(f"  indexing …")
-            result["index"] = await indexer.index_project(str(repo_path), project_id=repo.slug)
-            print(f"  indexed {result['index'].get('nodes_written', '?')} nodes in {time.time() - t0:.1f}s")
+        if not yes:
+            from src.indexer import estimate_project
+            est = estimate_project(str(repo_path))
+            print(f"\n  Found ~{est['estimated_functions']:,} functions, "
+                  f"~{est['estimated_classes']:,} classes in "
+                  f"{est['files']:,} files ({est['lines']:,} lines).")
+            print(f"  Estimated index time: {est['estimated_time']}")
+            resp = input("  Continue? [y/N] ").strip().lower()
+            if resp != "y":
+                print(f"  Skipping {repo.slug}.")
+                return result
 
-            if not skip_enrich:
-                t1 = time.time()
-                print(f"  enriching summaries …")
-                result["enrich"] = await pipeline.enrich_summaries(repo.slug, limit=2000)
-                enriched = result["enrich"].get("enriched", "?") if result["enrich"] else "?"
-                print(f"  enriched {enriched} functions in {time.time() - t1:.1f}s")
+        print(f"  indexing …")
+        result["index"] = await indexer.index_project(str(repo_path), project_id=repo.slug)
+        print(f"  indexed {result['index'].get('nodes_written', '?')} nodes in {time.time() - t0:.1f}s")
+
+        t1 = time.time()
+        print(f"  indexing schema objects (classes) …")
+        from src.schema_objects import index_schema_objects as _index_schema
+        result["schema"] = await _index_schema(db, embeddings, repo.slug, include_db_tables=False)
+        schema_total = result["schema"].get("total", "?")
+        print(f"  indexed {schema_total} schema objects in {time.time() - t1:.1f}s")
+
+        if not skip_enrich:
+            t1 = time.time()
+            print(f"  enriching summaries …")
+            result["enrich"] = await pipeline.enrich_summaries(repo.slug, limit=2000)
+            enriched = result["enrich"].get("enriched", "?") if result["enrich"] else "?"
+            print(f"  enriched {enriched} functions in {time.time() - t1:.1f}s")
 
         await _mark_as_demo(db, repo)
         result["demo_marked"] = True
@@ -171,12 +255,24 @@ def main():
         help="Skip LLM summary generation (saves API cost, lower search quality)",
     )
     parser.add_argument(
+        "--mark-only", action="store_true",
+        help="Skip clone+index+enrich; only mark already-indexed repos as demo projects",
+    )
+    parser.add_argument(
         "--repos", nargs="+", metavar="SLUG",
         help=f"Index only these slugs. Available: {[r.slug for r in DEMO_REPOS]}",
     )
     parser.add_argument(
         "--clone-dir", default="/tmp/phronosis-demos",
         help="Directory to clone repos into (default: /tmp/phronosis-demos)",
+    )
+    parser.add_argument(
+        "--pause", type=int, default=5,
+        help="Seconds to pause between repos to avoid embedding API rate limits (default: 5)",
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the pre-index confirmation prompt and index immediately",
     )
     args = parser.parse_args()
 
@@ -200,11 +296,24 @@ def main():
     total_t0 = time.time()
     results = []
 
-    for repo in repos:
+    for i, repo in enumerate(repos):
         print(f"── {repo.display_name} ──────────────────────────")
-        result = asyncio.run(_process_repo(repo, clone_dir, args.skip_enrich))
+        skip = args.skip_enrich or args.mark_only
+        if args.mark_only:
+            # Override: treat as already_indexed so only demo marking runs
+            repo = DemoRepo(
+                slug=repo.slug,
+                display_name=repo.display_name,
+                repo_url=repo.repo_url,
+                description=repo.description,
+                already_indexed=True,
+            )
+        result = asyncio.run(_process_repo(repo, clone_dir, skip, yes=args.yes))
         results.append(result)
         print()
+        if i < len(repos) - 1 and args.pause > 0:
+            print(f"  (pausing {args.pause}s before next repo…)")
+            time.sleep(args.pause)
 
     elapsed = time.time() - total_t0
     succeeded = [r for r in results if r["demo_marked"]]

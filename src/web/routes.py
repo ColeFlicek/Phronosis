@@ -77,10 +77,8 @@ def register_routes(
             embeddings = svcs.embeddings
 
             # ── Call graph ─────────────────────────────────────────────────
-            async with db._db.execute("SELECT COUNT(*) FROM nodes") as cur:
-                nodes = (await cur.fetchone())[0]
-            async with db._db.execute("SELECT COUNT(*) FROM edges") as cur:
-                edges = (await cur.fetchone())[0]
+            nodes = await db.count_nodes()
+            edges = await db.count_edges()
             result["layers"]["call_graph"] = {"status": "ok", "nodes": nodes, "edges": edges}
 
             # ── Embeddings (sqlite-vec, one table per project) ──────────────
@@ -94,14 +92,9 @@ def register_routes(
             }
 
             # ── Decision memory ────────────────────────────────────────────
-            async with db._db.execute("SELECT COUNT(*) FROM decisions") as cur:
-                dec_count = (await cur.fetchone())[0]
-            async with db._db.execute(
-                "SELECT COUNT(DISTINCT function_id) FROM decision_functions"
-            ) as cur:
-                linked = (await cur.fetchone())[0]
-            async with db._db.execute("SELECT COUNT(*) FROM decision_embeddings") as cur:
-                dec_emb_count = (await cur.fetchone())[0]
+            dec_count = await db.count_decisions()
+            linked = await db.count_decision_function_links()
+            dec_emb_count = await db.count_decision_embeddings()
             result["layers"]["decisions"] = {
                 "status": "ok",
                 "count": dec_count,
@@ -216,16 +209,14 @@ def register_routes(
             embeddings = svcs.embeddings
 
             try:
-                async with db._db.execute("SELECT COUNT(*) FROM nodes") as cur:
-                    n = (await cur.fetchone())[0]
+                n = await db.count_nodes()
                 result["call_graph"] = {"status": "ok", "node_count": n}
             except Exception as e:
                 result["call_graph"] = {"status": "error", "error": str(e)}
 
             try:
                 n = await embeddings.count_embeddings()
-                async with db._db.execute("SELECT COUNT(*) FROM decision_embeddings") as cur:
-                    d = (await cur.fetchone())[0]
+                d = await db.count_decision_embeddings()
                 result["embeddings"] = {
                     "status": "ok",
                     "function_vectors": n,
@@ -235,8 +226,7 @@ def register_routes(
                 result["embeddings"] = {"status": "error", "error": str(e)}
 
             try:
-                async with db._db.execute("SELECT COUNT(*) FROM decisions") as cur:
-                    d = (await cur.fetchone())[0]
+                d = await db.count_decisions()
                 result["decision_memory"] = {"status": "ok", "decision_count": d}
             except Exception as e:
                 result["decision_memory"] = {"status": "error", "error": str(e)}

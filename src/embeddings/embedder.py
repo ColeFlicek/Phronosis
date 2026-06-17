@@ -114,10 +114,22 @@ class EmbeddingStore:
 
     # ── Layer 2: function embeddings ───────────────────────────────────────
 
+    async def check_embedding_cache(self, body_hash: str) -> list[float] | None:
+        """Return the cached embedding vector for a body_hash, or None on miss."""
+        if not body_hash:
+            return None
+        conn = self._db._db
+        async with conn.execute(
+            "SELECT embedding FROM embedding_cache WHERE body_hash = ?", (body_hash,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
     async def upsert_vector(
-        self, node_id: str, vector: list[float], project_id: str
+        self, node_id: str, vector: list[float], project_id: str,
+        body_hash: str = "",
     ) -> None:
-        """Upsert one embedding vector into function_embeddings."""
+        """Upsert one embedding vector into function_embeddings and the global cache."""
         conn = self._db._db
         await conn.execute(
             """INSERT INTO function_embeddings(project_id, id, embedding)
@@ -125,6 +137,14 @@ class EmbeddingStore:
                ON CONFLICT(project_id, id) DO UPDATE SET embedding = excluded.embedding""",
             (project_id, node_id, vector),
         )
+        if body_hash:
+            from datetime import datetime, timezone
+            await conn.execute(
+                """INSERT INTO embedding_cache(body_hash, embedding, model, cached_at)
+                   VALUES(?, ?, ?, ?)
+                   ON CONFLICT(body_hash) DO NOTHING""",
+                (body_hash, vector, self._model, datetime.now(timezone.utc).isoformat()),
+            )
 
     async def delete_by_file(self, file_path: str, project_id: str) -> None:
         """Remove embedding vectors for all functions belonging to a source file."""
@@ -142,11 +162,15 @@ class EmbeddingStore:
         if not function_ids:
             return
         conn = self._db._db
-        ph = ",".join("?" * len(function_ids))
-        await conn.execute(
-            f"DELETE FROM function_embeddings WHERE project_id = ? AND id IN ({ph})",
-            (project_id, *function_ids),
-        )
+        # asyncpg caps query arguments at 32767; batch to stay under the limit.
+        batch_size = 10000
+        for i in range(0, len(function_ids), batch_size):
+            batch = function_ids[i:i + batch_size]
+            ph = ",".join("?" * len(batch))
+            await conn.execute(
+                f"DELETE FROM function_embeddings WHERE project_id = ? AND id IN ({ph})",
+                (project_id, *batch),
+            )
 
     async def get_embedded_ids(self, project_id: str) -> set:
         """Return the set of function IDs that currently have an embedding vector."""
@@ -406,6 +430,7 @@ class EmbeddingStore:
         """Embed a list of texts in batches of 100, logging progress per batch."""
         if not texts:
             return []
+        import asyncio as _asyncio
         results: list[list[float]] = []
         total_batches = (len(texts) + 99) // 100
         for i in range(0, len(texts), 100):
@@ -413,7 +438,17 @@ class EmbeddingStore:
             batch_num = i // 100 + 1
             print(f"[embeddings]   embed batch {batch_num}/{total_batches} "
                   f"({len(batch)} texts) → {self._provider}/{self._model}")
-            resp = await self._embed_client.embeddings.create(model=self._model, input=batch)
+            for attempt in range(5):
+                try:
+                    resp = await self._embed_client.embeddings.create(model=self._model, input=batch)
+                    break
+                except Exception as exc:
+                    if "rate_limit" in str(exc).lower() or "429" in str(exc):
+                        wait = 60 * (attempt + 1)
+                        print(f"[embeddings]   rate limit hit, waiting {wait}s (attempt {attempt+1}/5)")
+                        await _asyncio.sleep(wait)
+                    else:
+                        raise
             results.extend(item.embedding for item in sorted(resp.data, key=lambda x: x.index))
             print(f"[embeddings]   batch {batch_num}/{total_batches} ok")
         return results

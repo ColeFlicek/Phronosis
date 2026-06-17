@@ -34,6 +34,7 @@ class ContractManager:
         project_ids: list[str],
         title: str,
         natural_language: str,
+        function_ids: list[str] | None = None,
     ) -> dict:
         """
         Call Claude Haiku to parse natural_language into:
@@ -41,6 +42,11 @@ class ContractManager:
         - compliance_examples (2-3 code snippets that follow the rule)
         - structural_expression (JSON: prohibited_patterns, required_callee, scope_exclusions)
         - rule_type (SEMANTIC | BOUNDARY | PRESENCE)
+
+        function_ids: optional list of function IDs to scope this contract to.
+        When set, check_contracts only evaluates those functions instead of the
+        entire project — use this to encode pattern-level invariants (e.g. all
+        functions forming an Observer subsystem).
 
         Returns the saved draft contract with generated examples.
         """
@@ -55,6 +61,7 @@ class ContractManager:
             rule_type=parsed.get("rule_type", "SEMANTIC"),
             structural_expression=json.dumps(parsed.get("structural_expression", {})),
             threshold=0.85,
+            function_ids=function_ids,
         )
 
         def _to_str(c) -> str:
@@ -178,8 +185,10 @@ Return ONLY the JSON object, no markdown, no explanation."""
         violations: list[dict] = []
         for contract in active:
             structural_expr = json.loads(contract["structural_expression"])
+            scoped_ids = contract.get("function_ids") or []
             new_viols = await self._check_structural(
-                contract["id"], project_id, structural_expr
+                contract["id"], project_id, structural_expr,
+                function_ids=scoped_ids if scoped_ids else None,
             )
             violations.extend(new_viols)
         return violations
@@ -236,9 +245,14 @@ Return ONLY the JSON object, no markdown, no explanation."""
         return violations
 
     async def _check_structural(
-        self, contract_id: str, project_id: str, expr: dict
+        self, contract_id: str, project_id: str, expr: dict,
+        function_ids: list[str] | None = None,
     ) -> list[dict]:
-        """Scan all project functions for structural violations via call-graph traversal."""
+        """Scan project functions for structural violations via call-graph traversal.
+
+        function_ids: when provided, only these functions are checked (pattern-scoped
+        contracts). When None, the entire project is scanned.
+        """
         rule = ContractRule.from_expr(expr)
         violations: list[dict] = []
 
@@ -247,6 +261,8 @@ Return ONLY the JSON object, no markdown, no explanation."""
                 project_id, exclude_names=rule.excluded_names()
             )
             for row in rows:
+                if function_ids is not None and row["id"] not in function_ids:
+                    continue
                 await self._db.log_violation(
                     contract_id=contract_id,
                     function_id=row["id"],
@@ -265,7 +281,7 @@ Return ONLY the JSON object, no markdown, no explanation."""
         if not rule.needs_call_graph_check():
             return violations
 
-        caller_ids = await self._db.get_all_caller_ids(project_id)
+        caller_ids = function_ids if function_ids is not None else await self._db.get_all_caller_ids(project_id)
         for caller_id in caller_ids:
             if rule.is_excluded(caller_id):
                 continue

@@ -163,15 +163,20 @@ class CallGraphDB:
 
     # ── Projects ───────────────────────────────────────────────────────────
 
-    async def upsert_project(self, project_id: str, name: str, root: str = "") -> None:
+    async def upsert_project(
+        self, project_id: str, name: str, root: str = "",
+        branch: str = "", head_commit: str = "",
+    ) -> None:
         """Insert or update a project record, refreshing the last_indexed timestamp."""
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
-            """INSERT INTO projects(id, name, root, created_at, last_indexed)
-               VALUES(?, ?, ?, ?, ?)
+            """INSERT INTO projects(id, name, root, branch, head_commit, created_at, last_indexed)
+               VALUES(?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
-                   name=excluded.name, root=excluded.root, last_indexed=excluded.last_indexed""",
-            (project_id, name, root, now, now),
+                   name=excluded.name, root=excluded.root,
+                   branch=excluded.branch, head_commit=excluded.head_commit,
+                   last_indexed=excluded.last_indexed""",
+            (project_id, name, root, branch, head_commit, now, now),
         )
         await self._db.commit()
 
@@ -179,7 +184,8 @@ class CallGraphDB:
         """Return all registered projects with node and edge counts."""
         async with self._db.execute(
             """
-            SELECT p.id, p.name, p.root, p.created_at, p.last_indexed,
+            SELECT p.id, p.name, p.root, p.branch, p.head_commit,
+                   p.created_at, p.last_indexed,
                    (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count,
                    (SELECT COUNT(*) FROM edges e WHERE e.project_id = p.id) AS edge_count
             FROM projects p
@@ -187,6 +193,44 @@ class CallGraphDB:
             """
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    async def compare_projects(self, project_id_a: str, project_id_b: str) -> dict:
+        """Diff two project indexes at the call-graph level.
+
+        Returns functions added (in B, not A), removed (in A, not B),
+        and changed (same ID, different body_hash). Useful for branch comparison.
+        """
+        async with self._db.execute(
+            "SELECT id, body_hash, name, file, signature FROM nodes "
+            "WHERE project_id = ? AND is_external = 0", (project_id_a,)
+        ) as cur:
+            a_nodes = {r[0]: dict(r) for r in await cur.fetchall()}
+
+        async with self._db.execute(
+            "SELECT id, body_hash, name, file, signature FROM nodes "
+            "WHERE project_id = ? AND is_external = 0", (project_id_b,)
+        ) as cur:
+            b_nodes = {r[0]: dict(r) for r in await cur.fetchall()}
+
+        added = [b_nodes[k] for k in b_nodes if k not in a_nodes]
+        removed = [a_nodes[k] for k in a_nodes if k not in b_nodes]
+        changed = [
+            {"id": k, "from": a_nodes[k], "to": b_nodes[k]}
+            for k in a_nodes
+            if k in b_nodes and a_nodes[k]["body_hash"] != b_nodes[k]["body_hash"]
+        ]
+        return {
+            "project_a": project_id_a,
+            "project_b": project_id_b,
+            "added": added,
+            "removed": removed,
+            "changed": changed,
+            "summary": {
+                "added": len(added),
+                "removed": len(removed),
+                "changed": len(changed),
+            },
+        }
 
     async def rename_project(self, project_id: str, new_name: str) -> bool:
         """Update the display name of a project. Returns False if project not found."""
@@ -836,23 +880,24 @@ class CallGraphDB:
         rule_type: str = "SEMANTIC",
         structural_expression: str = "{}",
         threshold: float = 0.85,
+        function_ids: list[str] | None = None,
     ) -> dict:
         """Persist a new contract record in draft status and return it."""
         import json
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO contracts
-               (id, project_ids, title, natural_language, rule_type,
+               (id, project_ids, function_ids, title, natural_language, rule_type,
                 structural_expression, threshold, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)""",
-            (contract_id, json.dumps(project_ids), title, natural_language,
-             rule_type, structural_expression, threshold, now),
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)""",
+            (contract_id, json.dumps(project_ids), json.dumps(function_ids or []),
+             title, natural_language, rule_type, structural_expression, threshold, now),
         )
         await self._db.commit()
         return await self.get_contract(contract_id)
 
     async def get_contract(self, contract_id: str) -> dict | None:
-        """Fetch a contract by ID, decoding project_ids from JSON."""
+        """Fetch a contract by ID, decoding JSON list fields."""
         import json
         async with self._db.execute(
             "SELECT * FROM contracts WHERE id = ?", (contract_id,)
@@ -862,6 +907,7 @@ class CallGraphDB:
             return None
         r = dict(row)
         r["project_ids"] = json.loads(r["project_ids"])
+        r["function_ids"] = json.loads(r.get("function_ids") or "[]")
         return r
 
     async def list_contracts(self, project_id: str | None = None) -> list[dict]:
@@ -874,8 +920,37 @@ class CallGraphDB:
         result = []
         for r in rows:
             r["project_ids"] = json.loads(r["project_ids"])
+            r["function_ids"] = json.loads(r.get("function_ids") or "[]")
             if project_id is None or project_id in r["project_ids"]:
                 result.append(r)
+        return result
+
+    async def get_contracts_for_function(self, function_id: str, project_id: str) -> list[dict]:
+        """Return active contracts that cover a specific function.
+
+        Matching rules (checked in order per function_ids entry):
+        - Empty function_ids → project-wide contract, always matches.
+        - Entry ending in '.*' → prefix glob: matches any function whose ID
+          starts with the prefix (e.g. 'myproject.EventBus.*' covers all
+          current and future methods on EventBus).
+        - Exact entry → matches only that function ID.
+        """
+        contracts = await self.list_contracts(project_id)
+        active = [c for c in contracts if c["status"] == "active"]
+        result = []
+        for c in active:
+            fids = c.get("function_ids") or []
+            if not fids:
+                result.append(c)
+                continue
+            for fid in fids:
+                if fid.endswith(".*"):
+                    if function_id.startswith(fid[:-1]):  # strip '*', keep trailing '.'
+                        result.append(c)
+                        break
+                elif fid == function_id:
+                    result.append(c)
+                    break
         return result
 
     async def update_contract_status(self, contract_id: str, status: str) -> None:
@@ -1081,6 +1156,35 @@ class CallGraphDB:
             return None
         return {"hashes": json.loads(row[0]), "captured_at": row[1]}
 
+    # ── Count helpers ──────────────────────────────────────────────────────
+
+    async def count_nodes(self) -> int:
+        """Total node count across all projects."""
+        async with self._db.execute("SELECT COUNT(*) FROM nodes") as cur:
+            return (await cur.fetchone())[0]
+
+    async def count_edges(self) -> int:
+        """Total edge count across all projects."""
+        async with self._db.execute("SELECT COUNT(*) FROM edges") as cur:
+            return (await cur.fetchone())[0]
+
+    async def count_decisions(self) -> int:
+        """Total decision count across all projects."""
+        async with self._db.execute("SELECT COUNT(*) FROM decisions") as cur:
+            return (await cur.fetchone())[0]
+
+    async def count_decision_function_links(self) -> int:
+        """Count of distinct function IDs linked to any decision."""
+        async with self._db.execute(
+            "SELECT COUNT(DISTINCT function_id) FROM decision_functions"
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+    async def count_decision_embeddings(self) -> int:
+        """Total decision embedding count."""
+        async with self._db.execute("SELECT COUNT(*) FROM decision_embeddings") as cur:
+            return (await cur.fetchone())[0]
+
     # ── Analysis data accessors ────────────────────────────────────────────
     # These methods exist so that analysis modules (performance, schema_objects)
     # do not access db._db directly.  Callers must not use db._db outside
@@ -1109,14 +1213,20 @@ class CallGraphDB:
         self, project_id: str
     ) -> dict[str, str]:
         """Return {function_id: description} for acknowledged Performance decisions."""
+        return await self.get_acknowledged_decisions_by_type(project_id, "Performance")
+
+    async def get_acknowledged_decisions_by_type(
+        self, project_id: str, decision_type: str
+    ) -> dict[str, str]:
+        """Return {function_id: description} for acknowledged decisions of a given type."""
         async with self._db.execute(
             """
             SELECT df.function_id, d.description
             FROM decisions d
             JOIN decision_functions df ON df.decision_id = d.id
-            WHERE d.project_id = ? AND d.type = 'Performance'
+            WHERE d.project_id = ? AND d.type = ?
             """,
-            (project_id,),
+            (project_id, decision_type),
         ) as cur:
             return {r["function_id"]: r["description"] for r in await cur.fetchall()}
 
