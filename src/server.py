@@ -162,17 +162,140 @@ async def list_projects() -> str:
     return json.dumps(result)
 
 
+# ── Branch / diff tools ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def compare_branches(project_id_a: str, project_id_b: str) -> str:
+    """
+    Diff two indexed project snapshots at the call-graph level.
+
+    Returns functions added (in B, not A), removed (in A, not B), and changed
+    (same function ID, different body). Designed for branch comparison — index
+    each branch as a separate project_id (e.g. "myapp/main" vs "myapp/feature-x")
+    then call this to see what the feature branch changed.
+
+    project_id_a: the base (e.g. "myapp/main")
+    project_id_b: the head (e.g. "myapp/feature-x")
+    """
+    svcs = await _get_services()
+    result = await svcs.db.compare_projects(project_id_a, project_id_b)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def get_function_at_commit(
+    function_id: str, commit_hash: str, project_id: str = ""
+) -> str:
+    """
+    Read a function's implementation at a specific git commit without modifying
+    the stored index. Answers point-in-time questions: "what did this function
+    look like 3 months ago?" or "what was it before this refactor?"
+
+    function_id: full function ID (e.g. "src.auth.authenticate_user")
+    commit_hash: full or short git commit hash
+    project_id: project to resolve the function's file path. If omitted,
+    searches all projects.
+
+    Requires the git repo to be accessible at the project root on the server.
+    """
+    svcs = await _get_services()
+    pid = project_id or None
+
+    # Resolve function → file path from the stored index.
+    hits = await svcs.db.find_node_by_name(function_id, pid)
+    if not hits:
+        return json.dumps({"error": f"Function '{function_id}' not found in index."})
+
+    node = hits[0]
+    file_path = node.get("file", "")
+    node_project = node.get("project_id", project_id)
+
+    # Get project root to find the git repo.
+    projects = await svcs.db.list_projects()
+    root = next((p["root"] for p in projects if p["id"] == node_project), "")
+    if not root:
+        return json.dumps({"error": f"Project root not found for '{node_project}'."})
+
+    # Make file path relative to project root for git show.
+    try:
+        rel_path = os.path.relpath(file_path, root)
+    except ValueError:
+        rel_path = file_path
+
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["git", "show", f"{commit_hash}:{rel_path}"],
+            capture_output=True, text=True, cwd=root, timeout=10,
+        )
+        if result.returncode != 0:
+            return json.dumps({
+                "error": f"git show failed: {result.stderr.strip()}",
+                "commit": commit_hash, "file": rel_path,
+            })
+        content = result.stdout
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+    # Parse just the target function from the historical content.
+    from .call_graph.parser import TreeSitterParser
+    parser = TreeSitterParser()
+    nodes, _ = parser.parse_file(file_path, content, project_root=root)
+    fn_name = function_id.split(".")[-1]
+    match = next(
+        (n for n in nodes if n.name == fn_name or n.id == function_id), None
+    )
+
+    if not match:
+        return json.dumps({
+            "note": f"Function '{fn_name}' not found at commit {commit_hash[:8]} — "
+                    "it may not have existed yet or had a different name.",
+            "commit": commit_hash[:8],
+            "file_content_length": len(content),
+        })
+
+    return json.dumps({
+        "function_id": function_id,
+        "commit": commit_hash[:8],
+        "name": match.name,
+        "signature": match.signature,
+        "body": match.body,
+        "file": rel_path,
+    })
+
+
 # ── Indexing tools ────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def index_project(path: str, project_id: str = "") -> str:
+async def estimate_index(path: str) -> str:
+    """
+    Quick pre-scan of a project directory: counts functions by regex and
+    returns an estimated index time before committing to a full index.
+
+    Use this before index_project to give the user a heads-up — present the
+    result in natural language and ask for confirmation before proceeding.
+    Runs in under 1 second on any project size (no DB, no embedding, no AST).
+
+    Returns: {"files": N, "estimated_functions": N, "estimated_seconds": N}
+    """
+    from .indexer import estimate_project
+    if not os.path.exists(path):
+        return json.dumps({"error": f"Path not found: {path}"})
+    return json.dumps(estimate_project(path))
+
+
+@mcp.tool()
+async def index_project(path: str, project_id: str = "", branch: str = "") -> str:
     """
     Full index of a project directory. Builds the call graph, embeds all
-    functions, and stores everything in SQLite + sqlite-vec. Run once on
+    functions, and stores everything in Postgres + pgvector. Run once on
     initial setup; use index_changes for in-session updates.
 
     project_id: slug to identify this project (e.g. "myapp"). If omitted,
     derived from the last path component.
+    branch: git branch name to record. If omitted, auto-detected from the
+    repo at path. Use this to index multiple branches of the same repo as
+    separate project_ids (e.g. project_id="myapp/feature-x", branch="feature-x").
     """
     svcs = await _get_services()
     pid = project_id or Path(path).name or "default"
@@ -273,6 +396,40 @@ async def enrich_summaries(
     return json.dumps({"job_id": job.id, "status": "queued"})
 
 
+_PATTERN_CONTRACT_NOTICE = (
+    "PATTERN CONTRACT: If new functions are added to this subsystem, "
+    "add their IDs to this contract's function_ids to maintain coverage."
+)
+
+
+def _fmt_contracts(contracts: list[dict]) -> list[dict]:
+    """Format active contracts for inline injection into tool responses."""
+    out = []
+    for c in contracts:
+        entry = {
+            "contract_id": c["id"],
+            "title": c["title"],
+            "rule": c["natural_language"],
+            "rule_type": c["rule_type"],
+            "status": c["status"],
+        }
+        if c.get("function_ids"):
+            entry["notice"] = _PATTERN_CONTRACT_NOTICE
+        out.append(entry)
+    return out
+
+
+async def _contracts_for_name(db, function_name: str, project_id: str) -> list[dict]:
+    """Resolve a function name to its full ID and return applicable active contracts."""
+    hits = await db.find_node_by_name(function_name, project_id or None)
+    if not hits:
+        return []
+    node = hits[0]
+    return await db.get_contracts_for_function(
+        node["id"], node.get("project_id") or project_id
+    )
+
+
 @mcp.tool()
 async def get_callers(function_name: str, project_id: str = "") -> str:
     """
@@ -285,7 +442,11 @@ async def get_callers(function_name: str, project_id: str = "") -> str:
     """
     svcs = await _get_services()
     results = await svcs.db.get_callers(function_name, project_id or None)
-    return json.dumps(results)
+    contracts = await _contracts_for_name(svcs.db, function_name, project_id)
+    out: dict = {"callers": results}
+    if contracts:
+        out["applicable_contracts"] = _fmt_contracts(contracts)
+    return json.dumps(out)
 
 
 @mcp.tool()
@@ -299,7 +460,11 @@ async def get_callees(function_name: str, project_id: str = "") -> str:
     """
     svcs = await _get_services()
     results = await svcs.db.get_callees(function_name, project_id or None)
-    return json.dumps(results)
+    contracts = await _contracts_for_name(svcs.db, function_name, project_id)
+    out: dict = {"callees": results}
+    if contracts:
+        out["applicable_contracts"] = _fmt_contracts(contracts)
+    return json.dumps(out)
 
 
 @mcp.tool()
@@ -317,7 +482,11 @@ async def get_impact_radius(
     """
     svcs = await _get_services()
     results = await svcs.db.get_impact_radius(function_name, depth, project_id or None)
-    return json.dumps(results)
+    contracts = await _contracts_for_name(svcs.db, function_name, project_id)
+    out: dict = {"impact_radius": results}
+    if contracts:
+        out["applicable_contracts"] = _fmt_contracts(contracts)
+    return json.dumps(out)
 
 
 @mcp.tool()
@@ -691,6 +860,7 @@ async def create_contract(
     title: str,
     natural_language: str,
     project_ids: list[str] | None = None,
+    function_ids: list[str] | None = None,
 ) -> str:
     """
     Create a new Invariant Contract in draft mode.
@@ -704,12 +874,16 @@ async def create_contract(
     title: short human-readable name for this contract
     natural_language: plain English rule (e.g. "all DB reads must go through read_secrets")
     project_ids: which projects this applies to. If omitted, requires explicit list.
+    function_ids: optional list of function IDs to scope this contract to a specific
+        subsystem or pattern (e.g. all functions forming an Observer). When set,
+        check_contracts only evaluates those functions instead of the whole project.
     """
     svcs = await _get_services()
     result = await svcs.contracts.generate_draft(
         project_ids=project_ids or [],
         title=title,
         natural_language=natural_language,
+        function_ids=function_ids,
     )
     return json.dumps(result)
 
@@ -878,12 +1052,16 @@ async def check_performance(project_id: str) -> str:
     """
     Surface potential performance concerns in an indexed project.
 
-    Runs two static detectors:
+    Runs three detectors:
     - correlated_join_aggregate: SQL queries that JOIN two tables sharing a
       parent key and then aggregate with COUNT — produces a row cross-product.
       This is the class of bug that caused list_projects to hang indefinitely.
     - n_plus_one: functions that contain a loop and call a DB-accessing
       function inside it — O(n) queries instead of O(1).
+    - quadratic_expansion: functions whose embeddings cluster near cross-product
+      semantics and either call another such function (silent O(n²) composition
+      with no visible loop) or are called inside a loop (O(n) × O(m) expansion).
+      Requires function embeddings to be indexed.
 
     Findings already acknowledged via dismiss_performance_concern are returned
     with status="acknowledged" so you know they exist but chose to accept them.
@@ -930,6 +1108,83 @@ async def dismiss_performance_concern(
         description=reason,
         rejected_alternatives="",
         trigger=f"dismissed via check_performance on project {project_id}",
+        linked_function_ids=[function_id],
+        parent_decision_id=None,
+        project_id=project_id,
+    )
+    return json.dumps({"status": "acknowledged", "decision_id": result.get("id")})
+
+
+# ── SOLID detectors ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def check_solid_principles(project_id: str) -> str:
+    """
+    Surface SOLID principle violations in an indexed project.
+
+    Runs three structural detectors — no embeddings or LLM calls required:
+
+    - SRP (Single Responsibility): functions whose callees span 3+ unrelated
+      subsystems have multiple independent reasons to change.
+
+    - OCP (Open/Closed): functions that isinstance-dispatch on 3+ concrete
+      types must be modified every time a new type is added — the opposite of
+      "closed for modification." Consider polymorphism or a handler registry.
+
+    - DIP (Dependency Inversion): non-infrastructure functions that directly
+      call raw DB-layer functions across a subsystem boundary skip the
+      abstraction layer. Business logic should depend on an interface, not
+      concrete storage internals.
+
+    Findings already acknowledged via dismiss_solid_concern are returned with
+    status="acknowledged". New findings are returned with status="new".
+
+    Respond to new findings by either refactoring or calling
+    dismiss_solid_concern with the reason the pattern is intentional.
+    """
+    from .solid import check_solid as _check
+    svcs = await _get_services()
+    findings = await _check(svcs.db, project_id)
+    by_principle: dict[str, int] = {}
+    for f in findings:
+        if not f.suppressed:
+            by_principle[f.principle] = by_principle.get(f.principle, 0) + 1
+    return json.dumps({
+        "project_id": project_id,
+        "total": len(findings),
+        "new": sum(1 for f in findings if not f.suppressed),
+        "acknowledged": sum(1 for f in findings if f.suppressed),
+        "by_principle": by_principle,
+        "findings": [f.to_dict() for f in findings],
+    }, indent=2)
+
+
+@mcp.tool()
+async def dismiss_solid_concern(
+    project_id: str,
+    function_id: str,
+    reason: str,
+) -> str:
+    """
+    Acknowledge a SOLID finding as intentional so it is not re-surfaced.
+
+    Use this when check_solid_principles flags something you have reviewed and
+    accepted — for example, an orchestrator function that intentionally
+    coordinates multiple subsystems and its cross-subsystem calls are by design.
+
+    The reason is stored as a SOLID decision in decision memory, linked to the
+    function. Future check_solid_principles calls will show it with
+    status="acknowledged" and your reason.
+
+    function_id: the id field from the check_solid_principles finding
+    reason: why this pattern is intentional or acceptable
+    """
+    svcs = await _get_services()
+    result = await svcs.decisions.log_decision(
+        type="SOLID",
+        description=reason,
+        rejected_alternatives="",
+        trigger=f"dismissed via check_solid_principles on project {project_id}",
         linked_function_ids=[function_id],
         parent_decision_id=None,
         project_id=project_id,
@@ -1143,7 +1398,7 @@ async def http_list_contracts(request: Request) -> JSONResponse:
 
 @mcp.custom_route("/api/contracts", methods=["POST"])
 async def http_create_contract(request: Request) -> JSONResponse:
-    """POST /api/contracts {title, natural_language, project_ids}"""
+    """POST /api/contracts {title, natural_language, project_ids, function_ids}"""
     try:
         data = await request.json()
         svcs = await _get_services()
@@ -1151,6 +1406,7 @@ async def http_create_contract(request: Request) -> JSONResponse:
             project_ids=data.get("project_ids", []),
             title=data.get("title", ""),
             natural_language=data.get("natural_language", ""),
+            function_ids=data.get("function_ids") or None,
         )
         return JSONResponse(result)
     except Exception as exc:
@@ -1342,9 +1598,12 @@ async def get_function_context(
             project_id=node_project,
         )
     )
+    contracts_task = _asyncio.create_task(
+        db.get_contracts_for_function(node_id, node_project)
+    )
 
-    callers, callees, impact, history, similar = await _asyncio.gather(
-        callers_task, callees_task, impact_task, history_task, similar_task,
+    callers, callees, impact, history, similar, contracts = await _asyncio.gather(
+        callers_task, callees_task, impact_task, history_task, similar_task, contracts_task,
         return_exceptions=True,
     )
 
@@ -1373,6 +1632,7 @@ async def get_function_context(
         "impact_radius": _safe(impact, []),
         "decision_history": _safe(history, []),
         "similar_functions": similar_clean,
+        "applicable_contracts": _fmt_contracts(_safe(contracts, [])),
     })
 
 

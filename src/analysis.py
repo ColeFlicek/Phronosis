@@ -73,16 +73,20 @@ class ArchitectureAnalyzer:
         return subsystems
 
     def _cross_subsystem_connections(self, data: GraphData) -> list[dict]:
+        # Only include connections between known internal subsystems.
+        # This filters out external library nodes (is_external=1), unresolved
+        # stdlib builtins (append, get, len), and any other bare names that
+        # don't map to a project module. External deps are surfaced separately
+        # via list_external_dependencies.
+        internal = {self._subsystem(n["id"]) for n in data.nodes}
+
         conn_counts: dict[tuple[str, str], int] = {}
         for caller_id, callee_id in data.edges:
             s_from = self._subsystem(caller_id)
             s_to = self._subsystem(callee_id)
             if s_from == s_to:
                 continue
-            # Exclude external library subsystems — they create O(n×m) noise in
-            # the wiring diagram because every internal module crosses every library.
-            # External dependencies are already visible via list_external_dependencies.
-            if s_from.startswith("external.") or s_to.startswith("external."):
+            if s_from not in internal or s_to not in internal:
                 continue
             key = (s_from, s_to)
             conn_counts[key] = conn_counts.get(key, 0) + 1

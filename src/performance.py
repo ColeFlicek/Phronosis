@@ -10,6 +10,9 @@ Detectors:
     GROUP BY + COUNT — produces a Cartesian product before aggregation.
   - n_plus_one: a function that iterates over a collection and calls a
     function that transitively reaches the DB layer.
+  - quadratic_expansion: functions whose embeddings cluster near cross-product
+    semantics AND either call another such function (silent O(n²) composition)
+    or are called inside a loop (O(n) × O(m) expansion).
 
 Scoring (object embedding layer):
   Each N+1 candidate is scored by extracting which schema objects the loop
@@ -241,6 +244,51 @@ def _score_n_plus_one(
     return "medium", ""
 
 
+# ── Quadratic expansion seeds + classifier ───────────────────────────────────
+
+# Describes functions that produce cross-product / all-pairs output
+_EXPAND_SEED = (
+    "returns cartesian product or cross product of two collections, "
+    "all pairs from two inputs, every combination of elements, "
+    "itertools.product, output size scales as n times m, "
+    "[(x, y) for x in a for y in b], nested iteration returning tuples or pairs"
+)
+
+# Describes functions that collapse a collection to a scalar — used as a
+# negative filter so len/sum/count don't appear as expansion candidates
+_REDUCE_SEED = (
+    "returns a scalar, count, sum, length, single value, aggregate, "
+    "collapses a collection to one number, len(), sum(), max(), min(), "
+    "does not return a collection, returns int or float or bool"
+)
+
+
+async def _classify_expand_functions(
+    embeddings,
+    project_id: str,
+    top_k: int = 50,
+    expand_threshold: float = 0.72,
+    reduce_threshold: float = 0.70,
+) -> set[str]:
+    """
+    Return the set of function IDs whose embeddings cluster near quadratic
+    expansion semantics. Subtracts functions that cluster near reduce/aggregate
+    semantics to avoid flagging len(), sum(), etc.
+    """
+    expand_rows = await embeddings.query_similar(
+        _EXPAND_SEED, top_k=top_k, project_id=project_id
+    )
+    reduce_rows = await embeddings.query_similar(
+        _REDUCE_SEED, top_k=top_k, project_id=project_id
+    )
+    reduce_ids = {r["id"] for r in reduce_rows if r["similarity"] >= reduce_threshold}
+    return {
+        r["id"]
+        for r in expand_rows
+        if r["similarity"] >= expand_threshold and r["id"] not in reduce_ids
+    }
+
+
 # ── N+1 detector ─────────────────────────────────────────────────────────────
 
 # Signatures that indicate a function is a DB access point
@@ -312,6 +360,50 @@ async def detect_n_plus_one(
     return findings
 
 
+# ── Quadratic expansion detector ─────────────────────────────────────────────
+
+async def detect_quadratic_expansion(
+    nodes_by_id: dict[str, dict],
+    callee_map: dict[str, list[str]],
+    expand_ids: set[str],
+) -> list[tuple[str, str]]:
+    """
+    Return list of (function_id, detail) for O(n²) expansion patterns.
+
+    Two signals, neither requiring an explicit nested loop:
+
+    Composition — an expand-classified function calls another expand-classified
+    function. The caller's output may grow as O(n×m) without any visible loop
+    because the expansion is implicit in the callee's semantics.
+
+    Loop + expand — a function with a for-loop calls an expand-classified
+    function inside the loop: O(n) iterations × O(m) expansion per iteration.
+    Complements n_plus_one by covering Python collections, not just DB sinks.
+    """
+    findings = []
+    for node_id, node in nodes_by_id.items():
+        direct_callees = callee_map.get(node_id, [])
+        expand_callees = [c for c in direct_callees if c in expand_ids and c != node_id]
+        if not expand_callees:
+            continue
+
+        callee_names = [nodes_by_id[c]["name"] for c in expand_callees if c in nodes_by_id]
+
+        if node_id in expand_ids:
+            findings.append((node_id, (
+                f"Expansion function calls {', '.join(callee_names)} — both "
+                f"operations scale with collection size. Output may grow as "
+                f"O(n×m) or O(n²) without a visible loop."
+            )))
+        elif _has_loop(node):
+            findings.append((node_id, (
+                f"Loop calls expansion function(s) {', '.join(callee_names)} — "
+                f"O(n) iterations × O(m) expansion per iteration."
+            )))
+
+    return findings
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def check_performance(
@@ -331,7 +423,10 @@ async def check_performance(
     callee_map = await db.get_callee_map(project_id)
     acknowledged = await db.get_acknowledged_performance_decisions(project_id)
     schema_objects = await load_schema_objects(db, project_id)
-    return await _run_detectors(nodes_by_id, callee_map, acknowledged, schema_objects)
+    expand_ids: set[str] = set()
+    if embeddings is not None:
+        expand_ids = await _classify_expand_functions(embeddings, project_id)
+    return await _run_detectors(nodes_by_id, callee_map, acknowledged, schema_objects, expand_ids)
 
 
 async def _run_detectors(
@@ -339,6 +434,7 @@ async def _run_detectors(
     callee_map: dict[str, list[str]],
     acknowledged: dict[str, str],
     schema_objects: list,
+    expand_ids: set[str] | None = None,
 ) -> list[Finding]:
     """Pure detection pipeline — no I/O. Accepts pre-loaded data from check_performance.
 
@@ -396,6 +492,23 @@ async def _run_detectors(
             suppressed=suppressed,
             suppression_reason=suppression_reason,
         ))
+
+    # ── Quadratic expansion detector ─────────────────────────────────────────
+    if expand_ids:
+        quad_findings = await detect_quadratic_expansion(nodes_by_id, callee_map, expand_ids)
+        for fn_id, detail in quad_findings:
+            node = nodes_by_id.get(fn_id, {})
+            suppressed = fn_id in acknowledged
+            findings.append(Finding(
+                function_id=fn_id,
+                function_name=node.get("name", fn_id),
+                file=node.get("file", ""),
+                pattern="quadratic_expansion",
+                severity="medium",
+                detail=detail,
+                suppressed=suppressed,
+                suppression_reason=acknowledged.get(fn_id, ""),
+            ))
 
     _sev = {"high": 0, "medium": 1, "low": 2}
     findings.sort(key=lambda f: (f.suppressed, _sev.get(f.severity, 9)))
