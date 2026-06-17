@@ -300,8 +300,9 @@ _DB_SINK_PATTERNS = re.compile(
 
 # Signatures that indicate a function iterates: for loop, list comprehension
 _LOOP_PATTERNS = re.compile(
-    r"\bfor\s+\w+\s+in\b",
-    re.IGNORECASE,
+    r"\bfor\s+[\w,\s(]+\s+in\b"   # for x in / for x, y in / for (x, y) in
+    r"|(?<!\w)\[.+\bfor\b.+\bin\b",  # list comprehension [... for ... in ...]
+    re.DOTALL,
 )
 
 
@@ -370,15 +371,17 @@ async def detect_quadratic_expansion(
     """
     Return list of (function_id, detail) for O(n²) expansion patterns.
 
-    Two signals, neither requiring an explicit nested loop:
+    Three signals, in descending confidence:
 
     Composition — an expand-classified function calls another expand-classified
-    function. The caller's output may grow as O(n×m) without any visible loop
-    because the expansion is implicit in the callee's semantics.
+    function. Output may grow as O(n×m) without any visible loop.
 
-    Loop + expand — a function with a for-loop calls an expand-classified
-    function inside the loop: O(n) iterations × O(m) expansion per iteration.
-    Complements n_plus_one by covering Python collections, not just DB sinks.
+    Loop + expand — a function with a for-loop or comprehension calls an
+    expand-classified function inside the iteration: O(n) × O(m).
+
+    Caller — any internal function that calls an expand-classified function.
+    Lowest confidence but catches the common case where a non-expansion function
+    delegates quadratic work to a utility (e.g. _grid_from_X calling cartesian).
     """
     findings = []
     for node_id, node in nodes_by_id.items():
@@ -390,15 +393,20 @@ async def detect_quadratic_expansion(
         callee_names = [nodes_by_id[c]["name"] for c in expand_callees if c in nodes_by_id]
 
         if node_id in expand_ids:
-            findings.append((node_id, (
+            findings.append(("high", node_id, (
                 f"Expansion function calls {', '.join(callee_names)} — both "
                 f"operations scale with collection size. Output may grow as "
                 f"O(n×m) or O(n²) without a visible loop."
             )))
         elif _has_loop(node):
-            findings.append((node_id, (
+            findings.append(("medium", node_id, (
                 f"Loop calls expansion function(s) {', '.join(callee_names)} — "
                 f"O(n) iterations × O(m) expansion per iteration."
+            )))
+        else:
+            findings.append(("low", node_id, (
+                f"Calls expansion function(s) {', '.join(callee_names)} — "
+                f"output may scale quadratically with input size."
             )))
 
     return findings
@@ -499,18 +507,23 @@ async def _run_detectors(
     # ── Quadratic expansion detector ─────────────────────────────────────────
     if expand_ids:
         quad_findings = await detect_quadratic_expansion(nodes_by_id, callee_map, expand_ids)
-        for fn_id, detail in quad_findings:
+        for severity, fn_id, detail in quad_findings:
             node = nodes_by_id.get(fn_id, {})
             suppressed = fn_id in acknowledged
+            if severity == "low" and fn_id not in acknowledged:
+                suppressed = True
+                suppression_reason = "auto: low-confidence expansion call — review manually"
+            else:
+                suppression_reason = acknowledged.get(fn_id, "")
             findings.append(Finding(
                 function_id=fn_id,
                 function_name=node.get("name", fn_id),
                 file=node.get("file", ""),
                 pattern="quadratic_expansion",
-                severity="medium",
+                severity=severity,
                 detail=detail,
                 suppressed=suppressed,
-                suppression_reason=acknowledged.get(fn_id, ""),
+                suppression_reason=suppression_reason,
             ))
 
     _sev = {"high": 0, "medium": 1, "low": 2}
