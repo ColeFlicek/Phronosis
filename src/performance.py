@@ -425,7 +425,10 @@ async def check_performance(
     schema_objects = await load_schema_objects(db, project_id)
     expand_ids: set[str] = set()
     if embeddings is not None:
-        expand_ids = await _classify_expand_functions(embeddings, project_id)
+        # check_performance receives an EmbeddingPipeline; query_similar lives on
+        # its underlying EmbeddingStore.
+        store = getattr(embeddings, "_store", embeddings)
+        expand_ids = await _classify_expand_functions(store, project_id)
     return await _run_detectors(nodes_by_id, callee_map, acknowledged, schema_objects, expand_ids)
 
 
