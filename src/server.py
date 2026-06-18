@@ -306,7 +306,18 @@ async def index_project(path: str, project_id: str = "", branch: str = "") -> st
         job = _check_and_enqueue(user_id, run_index_project, path, pid, job_timeout=3600)
     except RuntimeError:
         return json.dumps({"status": "rate_limited"})
-    return json.dumps({"job_id": job.id, "status": "queued"})
+    hook_path = Path(path) / ".git" / "hooks" / "post-commit"
+    hook_installed = hook_path.exists() and os.access(hook_path, os.X_OK)
+    response: dict = {"job_id": job.id, "status": "queued"}
+    if not hook_installed:
+        response["hook_missing"] = True
+        response["hook_warning"] = (
+            "No executable post-commit hook found at .git/hooks/post-commit. "
+            "Contract violations from direct git commits will not be detected. "
+            "Install with: cp /path/to/phronosis/scripts/post-commit.sh "
+            ".git/hooks/post-commit && chmod +x .git/hooks/post-commit"
+        )
+    return json.dumps(response)
 
 
 @mcp.tool()
@@ -324,6 +335,11 @@ async def index_changes(
 
     project_id: must match the value used in index_project. If omitted,
     derived from project_root's last component.
+
+    Contract violations detected in the written functions are returned inline
+    under "contract_violations". An empty list means no active contracts fired.
+    Fix or acknowledge violations before proceeding — writing code that violates
+    an active contract is the primary adversarial failure vector for the system.
     """
     svcs = await _get_services()
     pid = project_id or (_derive_project_id(project_root) if project_root else "default")
@@ -331,6 +347,12 @@ async def index_changes(
     result = await svcs.indexer.index_changes(
         file_paths, file_contents, project_root=project_root, project_id=project_id
     )
+    written_ids = result.pop("function_ids", [])
+    if written_ids:
+        violations = await svcs.contracts.check_functions(pid, written_ids)
+        result["contract_violations"] = violations
+    else:
+        result["contract_violations"] = []
     return json.dumps(result)
 
 
@@ -1311,6 +1333,12 @@ async def http_index_bulk(request: Request) -> JSONResponse:
         result = await svcs.indexer.index_changes(
             list(files.keys()), files, project_root=project_root, project_id=project_id
         )
+        written_ids = result.pop("function_ids", [])
+        if written_ids:
+            violations = await svcs.contracts.check_functions(project_id, written_ids)
+            result["contract_violations"] = violations
+        else:
+            result["contract_violations"] = []
         return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)

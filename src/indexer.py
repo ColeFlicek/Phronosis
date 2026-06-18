@@ -441,6 +441,7 @@ class Indexer:
             "files_updated": len([fp for fp in file_paths if file_contents.get(fp) is not None]),
             "functions_updated": len(updated_nodes),
             "functions_reembedded": len(updated_chunks),
+            "function_ids": [n.id for n in updated_nodes],
         }
 
         # Capture fingerprint if external nodes changed (new import added or removed).
