@@ -32,19 +32,40 @@ class ContractRule:
         return {s.lower() for s in self.scope_exclusions}
 
     def find_prohibited_callees(self, callee_ids: list[str]) -> list[str]:
-        """Return callee IDs that match a prohibited pattern, respecting required_callee."""
+        """Return callee IDs that match a prohibited pattern, respecting required_callee.
+
+        Matching priority per callee (first match wins):
+        1. Glob — pattern ends with '.*': prefix match on full qualified ID
+           e.g. 'src.db.*' matches 'src.db.execute', 'src.db.query'
+        2. Qualified — pattern contains '.': exact match on full ID
+           e.g. 'src.db.raw_query' only matches that exact function
+        3. Bare name — last segment match (original behaviour, catches the common
+           case but can be defeated by moving the function to a new module)
+        """
         if not self.prohibited_patterns:
             return []
-        callee_names = [c.split(".")[-1].lower() for c in callee_ids]
         if self.required_callee:
             uses_required = any(self.required_callee.lower() in c.lower() for c in callee_ids)
             if uses_required:
                 return []
         hits = []
-        for pattern in self.prohibited_patterns:
-            for cid, name in zip(callee_ids, callee_names):
-                if name == pattern or name.startswith(pattern + "_") or name.endswith("_" + pattern):
+        for cid in callee_ids:
+            full = cid.lower()
+            last = full.split(".")[-1]
+            for pattern in self.prohibited_patterns:
+                matched = False
+                if pattern.endswith(".*"):
+                    prefix = pattern[:-2]
+                    matched = full.startswith(prefix + ".") or full == prefix
+                elif "." in pattern:
+                    matched = full == pattern
+                else:
+                    matched = (last == pattern
+                               or last.startswith(pattern + "_")
+                               or last.endswith("_" + pattern))
+                if matched:
                     hits.append(cid)
+                    break
         return hits
 
     def needs_call_graph_check(self) -> bool:

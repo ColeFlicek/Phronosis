@@ -175,8 +175,13 @@ Return ONLY the JSON object, no markdown, no explanation."""
 
     # ── Checking ───────────────────────────────────────────────────────────
 
-    async def check_project(self, project_id: str) -> list[dict]:
-        """Run all active contracts against a project's call graph and return all violations."""
+    async def check_project(self, project_id: str, semantic: bool = False) -> list[dict]:
+        """Run all active contracts against a project's call graph and return all violations.
+
+        semantic=False (default): structural call-graph checks only — fast, suitable for CI.
+        semantic=True: also runs embedding-based semantic checks against every project
+        function. Expensive for large projects — use on focused subsets or small codebases.
+        """
         contracts = await self._db.list_contracts(project_id)
         active = [c for c in contracts if c["status"] == "active"]
         if not active:
@@ -191,6 +196,42 @@ Return ONLY the JSON object, no markdown, no explanation."""
                 function_ids=scoped_ids if scoped_ids else None,
             )
             violations.extend(new_viols)
+
+        if semantic:
+            nodes_by_id = await self._db.get_nodes_with_bodies(project_id)
+            for fid, node in nodes_by_id.items():
+                if not node.get("is_external"):
+                    body = node.get("body", "") or ""
+                    snippet = "\n".join(filter(None, [
+                        node.get("signature", ""),
+                        node.get("docstring", ""),
+                        node.get("summary", ""),
+                        body[:600],
+                    ]))
+                    if not snippet.strip():
+                        continue
+                    for contract in active:
+                        is_viol, viol_score, comp_score = await self._embeddings.check_semantic(
+                            contract["id"], snippet
+                        )
+                        if is_viol:
+                            await self._db.log_violation(
+                                contract_id=contract["id"],
+                                function_id=fid,
+                                project_id=project_id,
+                                violation_type="semantic",
+                                score=viol_score,
+                            )
+                            violations.append({
+                                "contract_id": contract["id"],
+                                "contract_title": contract["title"],
+                                "function_id": fid,
+                                "project_id": project_id,
+                                "violation_type": "semantic",
+                                "score": viol_score,
+                                "compliance_score": comp_score,
+                            })
+
         return violations
 
     async def check_functions(
@@ -215,12 +256,12 @@ Return ONLY the JSON object, no markdown, no explanation."""
                 # Semantic check: embed the function's body text.
                 node = await self._db.get_node(fid, project_id)
                 if node:
-                    # Use signature + docstring for semantic check — more concrete than
-                    # the one-sentence summary and closer to the violation example patterns.
+                    body = node.get("body", "") or ""
                     snippet = "\n".join(filter(None, [
                         node.get("signature", ""),
                         node.get("docstring", ""),
                         node.get("summary", ""),
+                        body[:600],
                     ]))
                     is_viol, viol_score, comp_score = await self._embeddings.check_semantic(
                         contract["id"], snippet
@@ -297,13 +338,35 @@ Return ONLY the JSON object, no markdown, no explanation."""
         project_id: str,
         function_id: str,
         rule: ContractRule,
+        depth: int = 2,
     ) -> list[dict]:
-        """Check one function against a ContractRule using the canonical get_callees query."""
+        """Check one function against a ContractRule, BFS up to `depth` callee levels.
+
+        depth=2 catches one-wrapper bypasses: fn → helper → prohibited_callee.
+        Direct violations (depth 1) and transitive violations (depth 2) are both
+        reported against the original function_id.
+        """
         if rule.is_excluded(function_id) or not rule.needs_call_graph_check():
             return []
 
-        callees = await self._db.get_callees(function_id, project_id)
-        callee_ids = [c["id"] for c in callees]
+        # BFS: collect all callee IDs up to `depth` hops from function_id
+        visited: set[str] = {function_id}
+        frontier: list[str] = [function_id]
+        callee_ids: list[str] = []
+        for _ in range(depth):
+            next_frontier: list[str] = []
+            for fid in frontier:
+                callees = await self._db.get_callees(fid, project_id)
+                for c in callees:
+                    cid = c["id"]
+                    if cid not in visited:
+                        visited.add(cid)
+                        callee_ids.append(cid)
+                        next_frontier.append(cid)
+            frontier = next_frontier
+            if not frontier:
+                break
+
         matching = rule.find_prohibited_callees(callee_ids)
 
         if not matching:

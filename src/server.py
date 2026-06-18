@@ -923,15 +923,20 @@ async def list_contracts(project_id: str = "") -> str:
 
 
 @mcp.tool()
-async def check_contracts(project_id: str) -> str:
+async def check_contracts(project_id: str, semantic: bool = False) -> str:
     """
     Run all active contracts against the current call graph for a project.
 
-    Returns a list of violations — both structural (call graph traversal)
-    and semantic (embedding similarity against violation examples).
+    Returns a list of violations — structural (call graph traversal up to depth 2,
+    catching one-wrapper bypasses) and optionally semantic (embedding similarity
+    against violation examples).
+
+    semantic=False (default): structural checks only — fast, suitable for CI.
+    semantic=True: also runs embedding checks against every project function.
+    Expensive on large projects — use on small codebases or focused subsets.
     """
     svcs = await _get_services()
-    result = await svcs.contracts.check_project(project_id)
+    result = await svcs.contracts.check_project(project_id, semantic=semantic)
     return json.dumps(result)
 
 

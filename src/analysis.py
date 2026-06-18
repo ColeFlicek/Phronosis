@@ -185,7 +185,10 @@ class ArchitectureAnalyzer:
             "top_knowledge_gaps": top_knowledge_gaps,
             "churn_hotspots": churn_hotspots,
             "active_contract_count": len(data.contracts),
-            "active_contracts": [{"id": c["id"], "title": c["title"]} for c in data.contracts],
+            "active_contracts": [
+                {"id": c["id"], "title": c["title"], "rule": c.get("natural_language", "")}
+                for c in data.contracts
+            ],
             "recent_violation_count": data.recent_violation_count,
             "risk_detection_mode": risk_detection_mode,
         }
