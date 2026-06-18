@@ -30,8 +30,13 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_external     INTEGER NOT NULL DEFAULT 0,
     body            TEXT NOT NULL DEFAULT '',
     leading_comment TEXT NOT NULL DEFAULT '',
+    start_line      INT  NOT NULL DEFAULT 0,
+    end_line        INT  NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, id)
 );
+-- Idempotent column additions for existing deployments
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS start_line INT NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS end_line   INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS edges (
     id          BIGSERIAL PRIMARY KEY,

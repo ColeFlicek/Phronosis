@@ -69,6 +69,8 @@ class FunctionNode:
     body_hash: str = ""  # sha256[:16] of full function text — used to skip re-embedding unchanged functions
     decorators: list = field(default_factory=list)  # decorator call names, e.g. ["router.get", "login_required"]
     is_external: bool = False  # True for nodes from external libraries (SCIP reference targets)
+    start_line: int = 0       # 1-indexed source line where the function/class starts
+    end_line: int = 0         # 1-indexed source line where the function/class ends (inclusive)
 
 
 @dataclass
@@ -235,7 +237,11 @@ def _visit_python(
                 for base in bases_node.children:
                     if base.type == "identifier":
                         edges.append(CallEdge(caller_id=class_id, callee_name=_text(base, source), edge_type="inherits", file=file_path))
-            nodes.append(FunctionNode(id=class_id, name=class_name, file=file_path, module=module, type="class", signature=sig, body="", docstring=""))
+            nodes.append(FunctionNode(
+                id=class_id, name=class_name, file=file_path, module=module,
+                type="class", signature=sig, body="", docstring="",
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+            ))
             # Recurse into class body: class_id becomes the new enclosing_class.
             # enclosing_func is preserved so nested functions/methods inside this class
             # can still reference the correct function scope.
@@ -277,6 +283,7 @@ def _visit_python(
             leading_comment=leading_comment,
             body_hash=body_hash,
             decorators=_decorators or [],
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
 
         # Collect calls inside this function (not descending into nested defs)
@@ -440,7 +447,11 @@ def _visit_typescript(
                 for h in heritage.children:
                     if h.type == "identifier":
                         edges.append(CallEdge(caller_id=class_id, callee_name=_text(h, source), edge_type="inherits", file=file_path))
-            nodes.append(FunctionNode(id=class_id, name=class_name, file=file_path, module=module, type="class", signature=sig, body="", docstring=""))
+            nodes.append(FunctionNode(
+                id=class_id, name=class_name, file=file_path, module=module,
+                type="class", signature=sig, body="", docstring="",
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+            ))
             for child in node.children:
                 _visit_typescript(child, file_path, module, source, nodes, edges, parent_class=class_name)
         return
@@ -467,6 +478,7 @@ def _visit_typescript(
             type="method" if parent_class else "function",
             signature=signature, body=func_text[:2000], docstring=docstring,
             body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
 
         _collect_ts_calls(node, func_id, file_path, source, edges)
@@ -548,6 +560,7 @@ def _visit_rust(
                 docstring=_extract_rust_doc(node, source), body_hash=hashlib.sha256(
                     _node_text(node, source).encode("utf-8", errors="replace")
                 ).hexdigest()[:16],
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
             ))
         for child in node.children:
             _visit_rust(child, file_path, module, source, nodes, edges, parent_class=class_name if name_node else parent_class)
@@ -575,6 +588,7 @@ def _visit_rust(
             type="method" if parent_class else "function",
             signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
             docstring=_extract_rust_doc(node, source), body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
         _collect_rust_calls(node, func_id, file_path, source, edges)
         return
@@ -667,6 +681,7 @@ def _visit_go(
             type="method" if receiver_type else "function",
             signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
             docstring=_extract_go_doc(node, source), body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
         _collect_go_calls(node, func_id, file_path, source, edges)
         return
@@ -744,6 +759,7 @@ def _visit_java(
                 type="class", signature=sig, body="",
                 docstring=_extract_java_javadoc(node, source),
                 body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
             ))
             for child in node.children:
                 _visit_java(child, file_path, module, source, nodes, edges, parent_class=class_name)
@@ -763,6 +779,7 @@ def _visit_java(
             type="method" if parent_class else "function",
             signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
             docstring=_extract_java_javadoc(node, source), body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
         _collect_java_calls(node, func_id, file_path, source, edges)
         return
@@ -843,6 +860,7 @@ def _visit_cpp(
                 type="class", signature=sig, body="",
                 docstring=_extract_cpp_doc(node, source),
                 body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
             ))
             for child in node.children:
                 _visit_cpp(child, file_path, module, source, nodes, edges, parent_class=class_name)
@@ -862,6 +880,7 @@ def _visit_cpp(
             type="method" if parent_class else "function",
             signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
             docstring=_extract_cpp_doc(node, source), body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
         _collect_cpp_calls(node, func_id, file_path, source, edges)
         return
@@ -953,6 +972,7 @@ def _visit_csharp(
                 type="class", signature=sig, body="",
                 docstring=_extract_csharp_doc(node, source),
                 body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
             ))
             for child in node.children:
                 _visit_csharp(child, file_path, module, source, nodes, edges, parent_class=class_name)
@@ -972,6 +992,7 @@ def _visit_csharp(
             type="method" if parent_class else "function",
             signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
             docstring=_extract_csharp_doc(node, source), body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
         _collect_csharp_calls(node, func_id, file_path, source, edges)
         return
@@ -1049,6 +1070,7 @@ def _visit_ruby(
                 type="class", signature=sig, body="",
                 docstring=_extract_ruby_doc(node, source),
                 body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
             ))
             for child in node.children:
                 _visit_ruby(child, file_path, module, source, nodes, edges, parent_class=class_name)
@@ -1068,6 +1090,7 @@ def _visit_ruby(
             type="method" if parent_class else "function",
             signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
             docstring=_extract_ruby_doc(node, source), body_hash=body_hash,
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
         ))
         _collect_ruby_calls(node, func_id, file_path, source, edges)
         return

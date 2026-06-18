@@ -371,18 +371,19 @@ class CallGraphDB:
         rows = [
             (project_id, n.id, n.file, n.module, n.type, n.name,
              n.signature, n.docstring, n.body, n.body_hash, json.dumps(n.decorators),
-             1 if n.is_external else 0)
+             1 if n.is_external else 0, n.start_line, n.end_line)
             for n in nodes
         ]
         await self._db.executemany(
-            """INSERT INTO nodes(project_id,id,file,module,type,name,signature,docstring,summary,body,body_hash,decorators,is_external)
-               VALUES(?,?,?,?,?,?,?,?,'',?,?,?,?)
+            """INSERT INTO nodes(project_id,id,file,module,type,name,signature,docstring,summary,body,body_hash,decorators,is_external,start_line,end_line)
+               VALUES(?,?,?,?,?,?,?,?,'',?,?,?,?,?,?)
                ON CONFLICT(project_id,id) DO UPDATE SET
                    file=excluded.file, module=excluded.module, type=excluded.type,
                    name=excluded.name, signature=excluded.signature,
                    docstring=excluded.docstring, body=excluded.body,
                    body_hash=excluded.body_hash,
-                   decorators=excluded.decorators, is_external=excluded.is_external""",
+                   decorators=excluded.decorators, is_external=excluded.is_external,
+                   start_line=excluded.start_line, end_line=excluded.end_line""",
             rows,
         )
         await self._db.commit()
@@ -576,7 +577,7 @@ class CallGraphDB:
         for t in targets:
             async with self._db.execute(
                 f"""
-                SELECT n.id, n.name, n.file, n.module, n.signature, n.project_id, n.is_external, e.edge_type
+                SELECT n.id, n.name, n.file, n.module, n.signature, n.project_id, n.is_external, n.start_line, n.end_line, e.edge_type
                 FROM edges e
                 JOIN nodes n ON n.id = e.caller_id AND n.project_id = e.project_id
                 WHERE e.callee_id = ?{pid_clause}
@@ -603,7 +604,7 @@ class CallGraphDB:
         for t in targets:
             async with self._db.execute(
                 f"""
-                SELECT n.id, n.name, n.file, n.module, n.signature, n.project_id, n.is_external, e.edge_type
+                SELECT n.id, n.name, n.file, n.module, n.signature, n.project_id, n.is_external, n.start_line, n.end_line, e.edge_type
                 FROM edges e
                 JOIN nodes n ON n.id = e.callee_id AND n.project_id = e.project_id
                 WHERE e.caller_id = ?{pid_clause}
