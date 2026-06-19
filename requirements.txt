@@ -37,7 +37,6 @@ tree-sitter-solidity>=0.1.0
 tree-sitter-julia>=0.1.0
 tree-sitter-odin>=0.1.0
 tree-sitter-matlab>=0.1.0
-jedi>=0.19.0
 pytest>=8.0.0
 fakeredis>=2.0.0
 protobuf>=5.0.0
