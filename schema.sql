@@ -35,16 +35,18 @@ CREATE TABLE IF NOT EXISTS nodes (
     return_type     TEXT NOT NULL DEFAULT '',
     is_async        INTEGER NOT NULL DEFAULT 0,
     parameter_names TEXT NOT NULL DEFAULT '[]',
-    enclosing_class TEXT NOT NULL DEFAULT '',
+    enclosing_class  TEXT NOT NULL DEFAULT '',
+    structural_layer TEXT NOT NULL DEFAULT 'precision',
     PRIMARY KEY (project_id, id)
 );
 -- Idempotent column additions for existing deployments
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS start_line      INT     NOT NULL DEFAULT 0;
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS end_line        INT     NOT NULL DEFAULT 0;
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS return_type     TEXT    NOT NULL DEFAULT '';
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS is_async        INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS parameter_names TEXT    NOT NULL DEFAULT '[]';
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS enclosing_class TEXT    NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS start_line       INT     NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS end_line         INT     NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS return_type      TEXT    NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS is_async         INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS parameter_names  TEXT    NOT NULL DEFAULT '[]';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS enclosing_class  TEXT    NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS structural_layer TEXT    NOT NULL DEFAULT 'precision';
 
 CREATE TABLE IF NOT EXISTS edges (
     id          BIGSERIAL PRIMARY KEY,

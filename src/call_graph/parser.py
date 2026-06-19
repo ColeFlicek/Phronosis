@@ -55,6 +55,24 @@ try:
 except ImportError:
     _HAS_RUBY = False
 
+try:
+    import tree_sitter_swift as tsswift
+    _HAS_SWIFT = True
+except ImportError:
+    _HAS_SWIFT = False
+
+try:
+    import tree_sitter_kotlin as tskotlin
+    _HAS_KOTLIN = True
+except ImportError:
+    _HAS_KOTLIN = False
+
+try:
+    import tree_sitter_php as tsphp
+    _HAS_PHP = True
+except ImportError:
+    _HAS_PHP = False
+
 
 @dataclass
 class FunctionNode:
@@ -76,6 +94,7 @@ class FunctionNode:
     is_async: bool = False    # true for async def / async fn / async function
     parameter_names: list = field(default_factory=list)  # ["self", "project_id", ...]
     enclosing_class: str = "" # bare class name when this is a method; "" for top-level
+    structural_layer: str = "precision"  # "precision" | "generic" — quality signal for callers
 
 
 @dataclass
@@ -192,6 +211,14 @@ class TreeSitterParser:
             self._parsers[".cs"] = Parser(Language(tscsharp.language()))
         if _HAS_TREE_SITTER and _HAS_RUBY:
             self._parsers[".rb"] = Parser(Language(tsruby.language()))
+        if _HAS_TREE_SITTER and _HAS_SWIFT:
+            self._parsers[".swift"] = Parser(Language(tsswift.language()))
+        if _HAS_TREE_SITTER and _HAS_KOTLIN:
+            self._parsers[".kt"] = Parser(Language(tskotlin.language()))
+            self._parsers[".kts"] = Parser(Language(tskotlin.language()))
+        if _HAS_TREE_SITTER and _HAS_PHP:
+            self._parsers[".php"] = Parser(Language(tsphp.language_php()))
+            self._parsers[".phtml"] = Parser(Language(tsphp.language_php()))
 
     @property
     def supported_extensions(self) -> set[str]:
@@ -226,6 +253,12 @@ class TreeSitterParser:
             return _parse_csharp(tree.root_node, file_path, module, source)
         if ext == ".rb":
             return _parse_ruby(tree.root_node, file_path, module, source)
+        if ext == ".swift":
+            return _parse_swift(tree.root_node, file_path, module, source)
+        if ext in (".kt", ".kts"):
+            return _parse_kotlin(tree.root_node, file_path, module, source)
+        if ext in (".php", ".phtml"):
+            return _parse_php(tree.root_node, file_path, module, source)
         return [], []
 
 
@@ -1243,6 +1276,380 @@ def _collect_ruby_calls(
                 edges.append(CallEdge(caller_id=caller_id, callee_name=_text(name_node, source), edge_type="calls", file=file_path))
         _collect_ruby_calls(child, caller_id, file_path, source, edges)
 
+# ── Swift ────────────────────────────────────────────────────────────────────
+
+_SWIFT_CLASS_TYPES = {
+    "class_declaration", "struct_declaration", "protocol_declaration",
+    "enum_declaration", "extension_declaration",
+}
+_SWIFT_FUNC_TYPES = {"function_declaration", "init_declaration", "protocol_function_declaration"}
+
+
+def _parse_swift(
+    root: "Node", file_path: str, module: str, source: bytes
+) -> tuple[list[FunctionNode], list[CallEdge]]:
+    nodes: list[FunctionNode] = []
+    edges: list[CallEdge] = []
+    _visit_swift(root, file_path, module, source, nodes, edges, parent_class=None)
+    return nodes, edges
+
+
+def _visit_swift(
+    node: "Node",
+    file_path: str,
+    module: str,
+    source: bytes,
+    nodes: list[FunctionNode],
+    edges: list[CallEdge],
+    parent_class: str | None,
+) -> None:
+    if node.type in _SWIFT_CLASS_TYPES:
+        name_node = next((c for c in node.children if c.type == "type_identifier"), None)
+        if name_node:
+            class_name = _text(name_node, source)
+            class_id = f"{module}.{class_name}"
+            sig = _node_text(node, source).split("\n")[0].strip()
+            nodes.append(FunctionNode(
+                id=class_id, name=class_name, file=file_path, module=module,
+                type="class", signature=sig, body="", docstring="",
+                body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                is_async=False, return_type="", parameter_names=[],
+                enclosing_class=parent_class or "",
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+            ))
+            for child in node.children:
+                _visit_swift(child, file_path, module, source, nodes, edges, parent_class=class_name)
+        return
+
+    if node.type in _SWIFT_FUNC_TYPES:
+        if node.type == "init_declaration":
+            func_name = "init"
+        else:
+            name_node = next((c for c in node.children if c.type == "simple_identifier"), None)
+            if not name_node:
+                return
+            func_name = _text(name_node, source)
+
+        qual = f"{parent_class}.{func_name}" if parent_class else func_name
+        func_id = f"{module}.{qual}"
+        func_text = _node_text(node, source)
+        body_hash = hashlib.sha256(func_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+        sig = func_text.split("\n")[0].strip()
+
+        is_async = any(c.type == "async" for c in node.children)
+
+        # Return type follows "->" child
+        return_type = ""
+        found_arrow = False
+        for c in node.children:
+            if c.type == "->":
+                found_arrow = True
+            elif found_arrow and c.type in (
+                "user_type", "type_identifier", "optional_type",
+                "array_type", "dictionary_type", "tuple_type",
+            ):
+                return_type = _text(c, source)
+                break
+
+        nodes.append(FunctionNode(
+            id=func_id, name=qual, file=file_path, module=module,
+            type="method" if parent_class else "function",
+            signature=sig, body=func_text[:2000], docstring="",
+            body_hash=body_hash, is_async=is_async,
+            return_type=return_type,
+            parameter_names=_extract_param_names(sig),
+            enclosing_class=parent_class or "",
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+        ))
+        _collect_swift_calls(node, func_id, file_path, source, edges)
+        return
+
+    for child in node.children:
+        _visit_swift(child, file_path, module, source, nodes, edges, parent_class=parent_class)
+
+
+def _collect_swift_calls(
+    node: "Node", caller_id: str, file_path: str, source: bytes, edges: list[CallEdge]
+) -> None:
+    for child in node.children:
+        if child.type in _SWIFT_FUNC_TYPES:
+            continue
+        if child.type == "call_expression":
+            # First child is the called expression (simple_identifier or navigation_expression)
+            func_part = child.children[0] if child.children else None
+            if func_part:
+                if func_part.type == "simple_identifier":
+                    name = _text(func_part, source)
+                elif func_part.type in ("navigation_expression", "explicit_member_expression"):
+                    # Swift navigation_expression: "JSON.parse" or "network.get"
+                    # The method name is after the last dot.
+                    full = _text(func_part, source)
+                    name = full.rsplit(".", 1)[-1] if "." in full else full
+                else:
+                    name = ""
+                if name:
+                    edges.append(CallEdge(
+                        caller_id=caller_id, callee_name=name,
+                        edge_type="calls", file=file_path,
+                    ))
+        _collect_swift_calls(child, caller_id, file_path, source, edges)
+
+
+# ── Kotlin ───────────────────────────────────────────────────────────────────
+
+_KOTLIN_CLASS_TYPES = {
+    "class_declaration", "object_declaration", "interface_declaration",
+}
+_KOTLIN_FUNC_TYPES = {"function_declaration", "anonymous_initializer"}
+
+
+def _parse_kotlin(
+    root: "Node", file_path: str, module: str, source: bytes
+) -> tuple[list[FunctionNode], list[CallEdge]]:
+    nodes: list[FunctionNode] = []
+    edges: list[CallEdge] = []
+    _visit_kotlin(root, file_path, module, source, nodes, edges, parent_class=None)
+    return nodes, edges
+
+
+def _visit_kotlin(
+    node: "Node",
+    file_path: str,
+    module: str,
+    source: bytes,
+    nodes: list[FunctionNode],
+    edges: list[CallEdge],
+    parent_class: str | None,
+) -> None:
+    if node.type in _KOTLIN_CLASS_TYPES:
+        name_node = next((c for c in node.children if c.type == "identifier"), None)
+        if name_node:
+            class_name = _text(name_node, source)
+            class_id = f"{module}.{class_name}"
+            sig = _node_text(node, source).split("\n")[0].strip()
+            nodes.append(FunctionNode(
+                id=class_id, name=class_name, file=file_path, module=module,
+                type="class", signature=sig, body="", docstring="",
+                body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                is_async=False, return_type="", parameter_names=[],
+                enclosing_class=parent_class or "",
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+            ))
+            for child in node.children:
+                _visit_kotlin(child, file_path, module, source, nodes, edges, parent_class=class_name)
+        return
+
+    if node.type == "function_declaration":
+        name_node = next((c for c in node.children if c.type == "identifier"), None)
+        if not name_node:
+            return
+        func_name = _text(name_node, source)
+        qual = f"{parent_class}.{func_name}" if parent_class else func_name
+        func_id = f"{module}.{qual}"
+        func_text = _node_text(node, source)
+        body_hash = hashlib.sha256(func_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+        sig = func_text.split("\n")[0].strip()
+
+        # suspend keyword in modifiers → treat as async
+        modifiers = next((c for c in node.children if c.type == "modifiers"), None)
+        is_async = bool(modifiers and any(
+            any(gc.type == "suspend" for gc in c.children)
+            for c in modifiers.children if c.type == "function_modifier"
+        ))
+
+        # Return type: user_type or nullable_type child of function_declaration
+        # that immediately follows function_value_parameters. Regex on the
+        # signature string fails for single-expression functions (fun f(): T = expr).
+        return_type = ""
+        past_params = False
+        for c in node.children:
+            if c.type == "function_value_parameters":
+                past_params = True
+            elif past_params and c.type in ("user_type", "nullable_type", "function_type"):
+                return_type = _text(c, source)
+                break
+
+        # Parameters from function_value_parameters
+        param_names = []
+        params_node = next(
+            (c for c in node.children if c.type == "function_value_parameters"), None
+        )
+        if params_node:
+            for param in params_node.children:
+                if param.type == "parameter":
+                    pname = next((c for c in param.children if c.type == "identifier"), None)
+                    if pname:
+                        param_names.append(_text(pname, source))
+
+        nodes.append(FunctionNode(
+            id=func_id, name=qual, file=file_path, module=module,
+            type="method" if parent_class else "function",
+            signature=sig, body=func_text[:2000], docstring="",
+            body_hash=body_hash, is_async=is_async,
+            return_type=return_type, parameter_names=param_names,
+            enclosing_class=parent_class or "",
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+        ))
+        _collect_kotlin_calls(node, func_id, file_path, source, edges)
+        return
+
+    for child in node.children:
+        _visit_kotlin(child, file_path, module, source, nodes, edges, parent_class=parent_class)
+
+
+def _collect_kotlin_calls(
+    node: "Node", caller_id: str, file_path: str, source: bytes, edges: list[CallEdge]
+) -> None:
+    for child in node.children:
+        if child.type == "function_declaration":
+            continue
+        if child.type == "call_expression":
+            # First child is simple_identifier or navigation_expression
+            func_part = child.children[0] if child.children else None
+            if func_part:
+                if func_part.type == "identifier":
+                    name = _text(func_part, source)
+                elif func_part.type == "navigation_expression":
+                    name = next(
+                        (_text(c, source) for c in reversed(func_part.children)
+                         if c.type == "identifier"),
+                        "",
+                    )
+                else:
+                    name = _resolve_call_name(func_part, source)
+                if name:
+                    edges.append(CallEdge(
+                        caller_id=caller_id, callee_name=name,
+                        edge_type="calls", file=file_path,
+                    ))
+        _collect_kotlin_calls(child, caller_id, file_path, source, edges)
+
+
+# ── PHP ──────────────────────────────────────────────────────────────────────
+
+_PHP_CLASS_TYPES = {
+    "class_declaration", "trait_declaration", "interface_declaration",
+}
+_PHP_FUNC_TYPES = {"function_definition", "method_declaration"}
+_PHP_CALL_TYPES = {
+    "function_call_expression", "member_call_expression",
+    "scoped_call_expression", "nullsafe_member_call_expression",
+}
+
+
+def _parse_php(
+    root: "Node", file_path: str, module: str, source: bytes
+) -> tuple[list[FunctionNode], list[CallEdge]]:
+    nodes: list[FunctionNode] = []
+    edges: list[CallEdge] = []
+    _visit_php(root, file_path, module, source, nodes, edges, parent_class=None)
+    return nodes, edges
+
+
+def _visit_php(
+    node: "Node",
+    file_path: str,
+    module: str,
+    source: bytes,
+    nodes: list[FunctionNode],
+    edges: list[CallEdge],
+    parent_class: str | None,
+) -> None:
+    if node.type in _PHP_CLASS_TYPES:
+        name_node = next((c for c in node.children if c.type == "name"), None)
+        if name_node:
+            class_name = _text(name_node, source)
+            class_id = f"{module}.{class_name}"
+            sig = _node_text(node, source).split("\n")[0].strip()
+            nodes.append(FunctionNode(
+                id=class_id, name=class_name, file=file_path, module=module,
+                type="class", signature=sig, body="", docstring="",
+                body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                is_async=False, return_type="", parameter_names=[],
+                enclosing_class=parent_class or "",
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+            ))
+            for child in node.children:
+                _visit_php(child, file_path, module, source, nodes, edges, parent_class=class_name)
+        return
+
+    if node.type in _PHP_FUNC_TYPES:
+        name_node = next((c for c in node.children if c.type == "name"), None)
+        if not name_node:
+            return
+        func_name = _text(name_node, source)
+        qual = f"{parent_class}.{func_name}" if parent_class else func_name
+        func_id = f"{module}.{qual}"
+        func_text = _node_text(node, source)
+        body_hash = hashlib.sha256(func_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+        sig = func_text.split("\n")[0].strip()
+
+        # PHP has no native async
+        is_async = False
+
+        # Return type: named_type or union_type or intersection_type after ":"
+        return_type = ""
+        found_colon = False
+        for c in node.children:
+            if c.type == ":":
+                found_colon = True
+            elif found_colon and c.type in (
+                "named_type", "primitive_type", "union_type",
+                "intersection_type", "nullable_type",
+            ):
+                return_type = _text(c, source)
+                break
+
+        # Parameters: variable_name > name children of formal_parameters
+        param_names: list[str] = []
+        params_node = next(
+            (c for c in node.children if c.type == "formal_parameters"), None
+        )
+        if params_node:
+            for param in params_node.children:
+                if param.type in ("simple_parameter", "variadic_parameter", "property_promotion_parameter"):
+                    vname = next((c for c in param.children if c.type == "variable_name"), None)
+                    if vname:
+                        # variable_name: "$ name" — take the "name" child, not "$"
+                        n = next((c for c in vname.children if c.type == "name"), None)
+                        if n:
+                            param_names.append(_text(n, source))
+
+        nodes.append(FunctionNode(
+            id=func_id, name=qual, file=file_path, module=module,
+            type="method" if parent_class else "function",
+            signature=sig, body=func_text[:2000], docstring="",
+            body_hash=body_hash, is_async=is_async,
+            return_type=return_type, parameter_names=param_names,
+            enclosing_class=parent_class or "",
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+        ))
+        _collect_php_calls(node, func_id, file_path, source, edges)
+        return
+
+    for child in node.children:
+        _visit_php(child, file_path, module, source, nodes, edges, parent_class=parent_class)
+
+
+def _collect_php_calls(
+    node: "Node", caller_id: str, file_path: str, source: bytes, edges: list[CallEdge]
+) -> None:
+    for child in node.children:
+        if child.type in _PHP_FUNC_TYPES:
+            continue
+        if child.type in _PHP_CALL_TYPES:
+            # Last "name" child is the callee — for scoped_call_expression (JSON::parse)
+            # there are two name nodes (class, method); for others there is one.
+            name_nodes = [c for c in child.children if c.type == "name"]
+            name_node = name_nodes[-1] if name_nodes else None
+            if name_node:
+                edges.append(CallEdge(
+                    caller_id=caller_id, callee_name=_text(name_node, source),
+                    edge_type="calls", file=file_path,
+                ))
+        _collect_php_calls(child, caller_id, file_path, source, edges)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _text(node: "Node", source: bytes) -> str:
@@ -1292,7 +1699,8 @@ def _path_to_module(file_path: str, project_root: str) -> str:
 
     rel = rel.replace("\\", "/")
     for ext in (".py", ".ts", ".tsx", ".js", ".jsx",
-               ".rs", ".go", ".java", ".cpp", ".cc", ".hpp", ".cs", ".rb"):
+               ".rs", ".go", ".java", ".cpp", ".cc", ".hpp", ".cs", ".rb",
+               ".swift", ".kt", ".kts", ".php", ".phtml"):
         if rel.endswith(ext):
             rel = rel[: -len(ext)]
             break
