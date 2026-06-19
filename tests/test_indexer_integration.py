@@ -33,6 +33,7 @@ import pytest_asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from src.architecture_service import ArchitectureService
 from src.call_graph.storage import CallGraphDB
 from src.indexer import Indexer
 
@@ -366,7 +367,7 @@ class TestProjectHomeAfterIndex:
         _write_project(tmp_path, FIXTURE_SIMPLE)
         result = await indexer.index_project(str(tmp_path), project_id="test_proj")
 
-        home = await db.get_project_home_data("test_proj")
+        home = await ArchitectureService(db).get_project_home("test_proj")
         connections = home.get("connections", [])
         # A 2-file project has at most a handful of internal subsystem pairs.
         # 50 is already generous — if this hits 100+ something has broken.
@@ -383,7 +384,7 @@ class TestProjectHomeAfterIndex:
         _write_project(tmp_path, FIXTURE_SIMPLE)
         await indexer.index_project(str(tmp_path), project_id="test_proj")
 
-        home = await db.get_project_home_data("test_proj")
+        home = await ArchitectureService(db).get_project_home("test_proj")
         subsystems = home.get("subsystems", [])
         assert len(subsystems) > 0
         subsystem_names = {s["name"] for s in subsystems}

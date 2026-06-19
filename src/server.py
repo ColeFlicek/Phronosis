@@ -16,6 +16,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .architecture_service import ArchitectureService
 from .call_graph.storage import CallGraphDB
 from .client_setup import generate_setup_script, _default_claude_home
 from .dependency_fingerprint import (
@@ -96,6 +97,7 @@ class Services:
     indexer: Indexer
     contracts: ContractManager
     checker: DependencyChecker
+    arch: ArchitectureService
 
 
 _services: Services | None = None
@@ -120,6 +122,7 @@ async def _get_services() -> Services:
             db=db, embeddings=embeddings, pipeline=pipeline,
             decisions=decisions, indexer=indexer, contracts=contracts,
             checker=DependencyChecker(),
+            arch=ArchitectureService(db),
         )
     return _services
 
@@ -912,7 +915,7 @@ async def get_project_home(project_id: str) -> str:
     Read() only for exact implementation of the function you are about to modify.
     """
     svcs = await _get_services()
-    result = await svcs.db.get_project_home_data(project_id, max_age_seconds=300)
+    result = await svcs.arch.get_project_home(project_id, max_age_seconds=300)
     return json.dumps(result)
 
 
@@ -1648,7 +1651,7 @@ async def http_project_home(request: Request) -> JSONResponse:
     try:
         project_id = request.path_params["project_id"]
         svcs = await _get_services()
-        result = await svcs.db.get_project_home_data(project_id, max_age_seconds=1800)
+        result = await svcs.arch.get_project_home(project_id, max_age_seconds=1800)
         return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)

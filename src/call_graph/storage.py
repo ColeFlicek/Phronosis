@@ -115,8 +115,6 @@ class CallGraphDB:
         self._dsn = dsn
         self._pool: asyncpg.Pool | None = None
         self._db: _DB | None = None
-        # In-memory cache for get_project_home_data: project_id → (monotonic_ts, result)
-        self._project_home_cache: dict[str, tuple[float, dict]] = {}
 
     @classmethod
     async def create(cls, dsn: str = "") -> "CallGraphDB":
@@ -1194,7 +1192,7 @@ class CallGraphDB:
 
     # ── Project Home snapshots ─────────────────────────────────────────────────
 
-    async def _save_project_snapshot(
+    async def save_project_snapshot(
         self, project_id: str, hashes: dict[str, str], captured_at: str
     ) -> None:
         """Persist the current function-hash map so the next call can diff against it."""
@@ -1515,38 +1513,6 @@ class CallGraphDB:
             current_hashes=current_hashes,
             decisions_since=decisions_since,
         )
-
-    async def get_project_home_data(
-        self, project_id: str, max_age_seconds: int = 0
-    ) -> dict:
-        """
-        Compute a full architectural intelligence snapshot for one project.
-        All SQL — no LLM calls. Used by get_project_home MCP tool and web UI.
-
-        max_age_seconds: if > 0 and a cached result is younger than this many
-        seconds, return the cache without re-running the 8 SQL queries,
-        ArchitectureAnalyzer, and snapshot write. The hook passes 1800 (its
-        gate TTL); the MCP tool passes 300. 0 always recomputes.
-        """
-        import dataclasses
-        import time
-        from ..analysis import ArchitectureAnalyzer
-
-        if max_age_seconds > 0:
-            cached = self._project_home_cache.get(project_id)
-            if cached and (time.monotonic() - cached[0]) < max_age_seconds:
-                return cached[1]
-
-        data = await self.fetch_graph_data(project_id)
-        snapshot = ArchitectureAnalyzer().snapshot(data)
-        result = dataclasses.asdict(snapshot)
-        now_iso = datetime.now(timezone.utc).isoformat()
-        await self._save_project_snapshot(project_id, data.current_hashes, now_iso)
-
-        import time as _time
-        self._project_home_cache[project_id] = (_time.monotonic(), result)
-        return result
-
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
