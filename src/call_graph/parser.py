@@ -73,6 +73,50 @@ try:
 except ImportError:
     _HAS_PHP = False
 
+# ── Generic fallback grammars ─────────────────────────────────────────────────
+
+try:
+    import tree_sitter_bash as tsbash
+    _HAS_BASH = True
+except ImportError:
+    _HAS_BASH = False
+
+try:
+    import tree_sitter_lua as tslua
+    _HAS_LUA = True
+except ImportError:
+    _HAS_LUA = False
+
+try:
+    import tree_sitter_scala as tsscala
+    _HAS_SCALA = True
+except ImportError:
+    _HAS_SCALA = False
+
+try:
+    import tree_sitter_c as tsc
+    _HAS_C = True
+except ImportError:
+    _HAS_C = False
+
+try:
+    import tree_sitter_ocaml as tsocaml
+    _HAS_OCAML = True
+except ImportError:
+    _HAS_OCAML = False
+
+try:
+    import tree_sitter_elixir as tselixir
+    _HAS_ELIXIR = True
+except ImportError:
+    _HAS_ELIXIR = False
+
+try:
+    import tree_sitter_haskell as tshaskell
+    _HAS_HASKELL = True
+except ImportError:
+    _HAS_HASKELL = False
+
 
 @dataclass
 class FunctionNode:
@@ -220,22 +264,53 @@ class TreeSitterParser:
             self._parsers[".php"] = Parser(Language(tsphp.language_php()))
             self._parsers[".phtml"] = Parser(Language(tsphp.language_php()))
 
+        # Generic fallback parsers — lower fidelity (no class membership, async,
+        # or return types for most), but enables semantic search and blast-radius
+        # coverage for languages without a precision parser.
+        self._generic_parsers: dict[str, tuple["Parser", str]] = {}
+        if _HAS_TREE_SITTER and _HAS_BASH:
+            for ext in (".sh", ".bash", ".zsh", ".fish"):
+                self._generic_parsers[ext] = (Parser(Language(tsbash.language())), "bash")
+        if _HAS_TREE_SITTER and _HAS_LUA:
+            self._generic_parsers[".lua"] = (Parser(Language(tslua.language())), "lua")
+        if _HAS_TREE_SITTER and _HAS_SCALA:
+            for ext in (".scala", ".sc"):
+                self._generic_parsers[ext] = (Parser(Language(tsscala.language())), "scala")
+        if _HAS_TREE_SITTER and _HAS_C:
+            for ext in (".c", ".h"):
+                self._generic_parsers[ext] = (Parser(Language(tsc.language())), "c")
+        if _HAS_TREE_SITTER and _HAS_OCAML:
+            for ext in (".ml", ".mli"):
+                self._generic_parsers[ext] = (Parser(Language(tsocaml.language_ocaml())), "ocaml")
+        if _HAS_TREE_SITTER and _HAS_ELIXIR:
+            for ext in (".ex", ".exs"):
+                self._generic_parsers[ext] = (Parser(Language(tselixir.language())), "elixir")
+        if _HAS_TREE_SITTER and _HAS_HASKELL:
+            for ext in (".hs", ".lhs"):
+                self._generic_parsers[ext] = (Parser(Language(tshaskell.language())), "haskell")
+
     @property
     def supported_extensions(self) -> set[str]:
         """Return the set of file extensions this parser can handle."""
-        return set(self._parsers.keys())
+        return set(self._parsers.keys()) | set(self._generic_parsers.keys())
 
     def parse_file(
         self, file_path: str, content: str, project_root: str = ""
     ) -> tuple[list[FunctionNode], list[CallEdge]]:
         """Parse a source file and return (nodes, edges) for all functions and calls."""
         ext = Path(file_path).suffix.lower()
+        source = content.encode("utf-8", errors="replace")
+        module = _path_to_module(file_path, project_root)
+
         if ext not in self._parsers:
+            # Try generic fallback before giving up
+            if ext in self._generic_parsers:
+                gparser, lang = self._generic_parsers[ext]
+                tree = gparser.parse(source)
+                return _parse_generic(tree.root_node, file_path, module, source, lang)
             return [], []
 
-        source = content.encode("utf-8", errors="replace")
         tree = self._parsers[ext].parse(source)
-        module = _path_to_module(file_path, project_root)
 
         if ext == ".py":
             return _parse_python(tree.root_node, file_path, module, source)
@@ -1650,6 +1725,225 @@ def _collect_php_calls(
         _collect_php_calls(child, caller_id, file_path, source, edges)
 
 
+# ── Generic fallback parser ───────────────────────────────────────────────────
+
+# Function and class node types per language.
+_GENERIC_FUNC_TYPES: dict[str, frozenset[str]] = {
+    "bash":    frozenset({"function_definition"}),
+    "lua":     frozenset({"function_declaration"}),
+    "scala":   frozenset({"function_definition"}),
+    "c":       frozenset({"function_definition"}),
+    "ocaml":   frozenset({"value_definition"}),
+    "haskell": frozenset({"function"}),
+    # elixir: handled via identifier-verb inspection — not a fixed type name
+}
+_GENERIC_CLASS_TYPES: dict[str, frozenset[str]] = {
+    "scala":   frozenset({"class_definition", "object_definition", "trait_definition"}),
+    "c":       frozenset({"struct_specifier"}),
+    "ocaml":   frozenset({"module_definition"}),
+}
+
+# Node types to skip entirely (don't recurse into them) per language.
+# Prevents false-positive function matches inside type annotations or declarations.
+_GENERIC_SKIP_TYPES: dict[str, frozenset[str]] = {
+    # Haskell `signature` nodes contain `function` type nodes (e.g. "Int -> Int")
+    # that share the same node type as function definitions — skip them entirely.
+    "haskell": frozenset({"signature"}),
+}
+
+# Identifier-like child types tried in order when extracting a function name.
+_GENERIC_ID_TYPES = ("identifier", "name", "value_name", "word", "variable", "simple_identifier")
+
+# Call-expression heuristic: any node whose type contains these substrings.
+_GENERIC_CALL_SUBSTRINGS = ("call_expression", "function_call", "application", "invocation")
+
+
+def _generic_func_name(node: "Node", source: bytes, lang: str) -> str:
+    """Extract the function/class name from a generic language AST node."""
+    if lang == "c":
+        # function_definition → function_declarator → identifier
+        decl = next((c for c in node.children if c.type == "function_declarator"), None)
+        if decl:
+            id_n = next((c for c in decl.children if c.type == "identifier"), None)
+            return _text(id_n, source) if id_n else ""
+        return ""
+
+    if lang == "ocaml":
+        # value_definition → let_binding → value_name
+        binding = next((c for c in node.children if c.type == "let_binding"), None)
+        if binding:
+            vn = next((c for c in binding.children if c.type == "value_name"), None)
+            return _text(vn, source) if vn else ""
+        return ""
+
+    if lang == "elixir":
+        # call node: identifier tells us the verb (def/defp/defmodule)
+        # arguments holds name as an identifier or nested call (when there are params)
+        id_n = next((c for c in node.children if c.type == "identifier"), None)
+        if not id_n:
+            return ""
+        verb = _text(id_n, source)
+        args = next((c for c in node.children if c.type == "arguments"), None)
+        if not args:
+            return ""
+        if verb == "defmodule":
+            alias_n = next((c for c in args.children if c.type == "alias"), None)
+            return _text(alias_n, source) if alias_n else ""
+        # def/defp: first child of arguments is identifier (no params) or call (with params)
+        first = next((c for c in args.children if c.type in ("identifier", "call")), None)
+        if first is None:
+            return ""
+        if first.type == "call":
+            fn = next((c for c in first.children if c.type == "identifier"), None)
+            return _text(fn, source) if fn else ""
+        return _text(first, source)
+
+    # Default: first child matching a known identifier type
+    for child in node.children:
+        if child.type in _GENERIC_ID_TYPES:
+            name = _text(child, source).rstrip("(").strip()
+            if name and (name.isidentifier() or (name and name[0].isalpha())):
+                return name
+    return ""
+
+
+def _is_elixir_func(node: "Node", source: bytes) -> bool:
+    if node.type != "call":
+        return False
+    id_n = next((c for c in node.children if c.type == "identifier"), None)
+    return bool(id_n and _text(id_n, source) in ("def", "defp", "defmacro", "defmacrop"))
+
+
+def _is_elixir_class(node: "Node", source: bytes) -> bool:
+    if node.type != "call":
+        return False
+    id_n = next((c for c in node.children if c.type == "identifier"), None)
+    return bool(id_n and _text(id_n, source) == "defmodule")
+
+
+def _generic_collect_calls(
+    node: "Node",
+    caller_id: str,
+    file_path: str,
+    source: bytes,
+    edges: list[CallEdge],
+    func_types: frozenset[str],
+) -> None:
+    """Best-effort callee extraction using heuristics across grammars."""
+    for child in node.children:
+        if child.type in func_types:
+            continue  # don't descend into nested definitions
+        t = child.type.lower()
+        if any(sub in t for sub in _GENERIC_CALL_SUBSTRINGS):
+            name = next(
+                (_text(gc, source) for gc in child.children if gc.type in _GENERIC_ID_TYPES),
+                "",
+            )
+            if name and name.isidentifier():
+                edges.append(CallEdge(
+                    caller_id=caller_id, callee_name=name,
+                    edge_type="calls", file=file_path,
+                ))
+        _generic_collect_calls(child, caller_id, file_path, source, edges, func_types)
+
+
+def _parse_generic(
+    root: "Node", file_path: str, module: str, source: bytes, lang: str = ""
+) -> tuple[list[FunctionNode], list[CallEdge]]:
+    """
+    Generic parser for languages without a precision parser.
+
+    Uses language profiles (_GENERIC_FUNC_TYPES / _GENERIC_CLASS_TYPES) to
+    identify function and class nodes, then falls back to type-name heuristics
+    for unknown grammars. Sets structural_layer='generic' on all emitted nodes.
+
+    Fidelity relative to precision parsers:
+    - Names: extracted where possible (language-specific for C, OCaml, Elixir)
+    - Bodies: full text captured for embeddings / summaries
+    - Call edges: best-effort via heuristic (may miss complex call sites)
+    - is_async / return_type / parameter_names: always empty (not extracted)
+    - Class membership: captured when class_types profile exists
+    """
+    nodes: list[FunctionNode] = []
+    edges: list[CallEdge] = []
+    func_types = _GENERIC_FUNC_TYPES.get(lang, frozenset())
+    _visit_generic(root, file_path, module, source, nodes, edges, lang, func_types, None)
+    return nodes, edges
+
+
+def _visit_generic(
+    node: "Node",
+    file_path: str,
+    module: str,
+    source: bytes,
+    nodes: list[FunctionNode],
+    edges: list[CallEdge],
+    lang: str,
+    func_types: frozenset[str],
+    parent_class: str | None,
+) -> None:
+    if node.type in _GENERIC_SKIP_TYPES.get(lang, frozenset()):
+        return
+
+    # ── Class / module detection ──────────────────────────────────────────────
+    class_types = _GENERIC_CLASS_TYPES.get(lang, frozenset())
+    is_class = (node.type in class_types) or (lang == "elixir" and _is_elixir_class(node, source))
+    if is_class:
+        class_name = _generic_func_name(node, source, lang)
+        if class_name:
+            class_id = f"{module}.{class_name}"
+            sig = _node_text(node, source).split("\n")[0].strip()
+            nodes.append(FunctionNode(
+                id=class_id, name=class_name, file=file_path, module=module,
+                type="class", signature=sig, body="", docstring="",
+                body_hash=hashlib.sha256(sig.encode()).hexdigest()[:16],
+                is_async=False, return_type="", parameter_names=[],
+                enclosing_class=parent_class or "",
+                start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+                structural_layer="generic",
+            ))
+            for child in node.children:
+                _visit_generic(child, file_path, module, source, nodes, edges,
+                               lang, func_types, parent_class=class_name)
+        return
+
+    # ── Function detection ────────────────────────────────────────────────────
+    is_func = (node.type in func_types) or (lang == "elixir" and _is_elixir_func(node, source))
+    if not is_func and not func_types:
+        # Pure heuristic for completely unknown grammars
+        t = node.type.lower()
+        is_func = (
+            ("function" in t or "method" in t)
+            and "call" not in t and "type" not in t
+            and ("definition" in t or "declaration" in t or "item" in t)
+        )
+
+    if is_func:
+        func_name = _generic_func_name(node, source, lang)
+        if not func_name:
+            return
+        qual = f"{parent_class}.{func_name}" if parent_class else func_name
+        func_id = f"{module}.{qual}"
+        func_text = _node_text(node, source)
+        body_hash = hashlib.sha256(func_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+        nodes.append(FunctionNode(
+            id=func_id, name=qual, file=file_path, module=module,
+            type="method" if parent_class else "function",
+            signature=func_text.split("\n")[0].strip(), body=func_text[:2000],
+            docstring="", body_hash=body_hash,
+            is_async=False, return_type="", parameter_names=[],
+            enclosing_class=parent_class or "",
+            start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
+            structural_layer="generic",
+        ))
+        _generic_collect_calls(node, func_id, file_path, source, edges, func_types)
+        return
+
+    for child in node.children:
+        _visit_generic(child, file_path, module, source, nodes, edges,
+                       lang, func_types, parent_class=parent_class)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _text(node: "Node", source: bytes) -> str:
@@ -1700,7 +1994,10 @@ def _path_to_module(file_path: str, project_root: str) -> str:
     rel = rel.replace("\\", "/")
     for ext in (".py", ".ts", ".tsx", ".js", ".jsx",
                ".rs", ".go", ".java", ".cpp", ".cc", ".hpp", ".cs", ".rb",
-               ".swift", ".kt", ".kts", ".php", ".phtml"):
+               ".swift", ".kt", ".kts", ".php", ".phtml",
+               ".sh", ".bash", ".zsh", ".fish",
+               ".lua", ".scala", ".sc", ".c", ".h",
+               ".ml", ".mli", ".ex", ".exs", ".hs", ".lhs"):
         if rel.endswith(ext):
             rel = rel[: -len(ext)]
             break

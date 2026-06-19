@@ -773,9 +773,17 @@ async def _try_scip_index(
     import tempfile
 
     cmd_map = {
-        "python": ["scip-python", "index", "--project-name", project_id, "."],
+        # Phase 2 (Python/TypeScript): already supported
+        "python":     ["scip-python", "index", "--project-name", project_id, "."],
         "typescript": ["scip-typescript", "index", "--infer-tsconfig"],
         "javascript": ["scip-typescript", "index", "--infer-tsconfig"],
+        # Phase 3 (typed compiled languages): type-resolved call graphs via SCIP.
+        # These indexers must be installed separately; Phronosis silently skips
+        # SCIP augmentation when the binary is absent (tree-sitter remains the source).
+        "go":     ["scip-go", "--output", "index.scip"],
+        "java":   ["scip-java", "index"],
+        "rust":   ["rust-analyzer", "scip", "."],
+        "csharp": ["scip-dotnet", "index"],
     }
     cmd = cmd_map.get(language)
     if not cmd:
@@ -885,14 +893,28 @@ def _detect_primary_language(source_files: list[str]) -> str:
     """Return the dominant language in a project based on file extension counts."""
     from collections import Counter
     counts: Counter = Counter(Path(f).suffix.lower() for f in source_files)
-    priority = [".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".rs", ".go", ".cpp", ".cs", ".rb"]
+    # Priority order: languages with SCIP support first (enables augmentation),
+    # then precision tree-sitter languages, then generic-fallback languages.
+    priority = [
+        ".py", ".ts", ".tsx", ".js", ".jsx",
+        ".java", ".rs", ".go", ".cs",           # SCIP-enabled compiled languages
+        ".cpp", ".rb",
+        ".swift", ".kt", ".kts",                # Phase 2 precision parsers
+        ".php", ".phtml",
+        ".scala", ".sh", ".lua", ".ex",         # generic fallback
+    ]
+    lang_map = {
+        ".py": "python", ".ts": "typescript", ".tsx": "typescript",
+        ".js": "javascript", ".jsx": "javascript",
+        ".java": "java", ".rs": "rust", ".go": "go",
+        ".cs": "csharp", ".cpp": "cpp", ".rb": "ruby",
+        ".swift": "swift", ".kt": "kotlin", ".kts": "kotlin",
+        ".php": "php", ".phtml": "php",
+        ".scala": "scala", ".sh": "bash", ".lua": "lua",
+        ".ex": "elixir", ".exs": "elixir",
+    }
     for ext in priority:
         if counts.get(ext, 0) > 0:
-            lang_map = {
-                ".py": "python", ".ts": "typescript", ".tsx": "typescript",
-                ".js": "javascript", ".jsx": "javascript", ".java": "java",
-                ".rs": "rust", ".go": "go", ".cpp": "cpp", ".cs": "csharp", ".rb": "ruby",
-            }
             return lang_map.get(ext, "")
     return ""
 
