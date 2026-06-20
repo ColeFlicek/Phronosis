@@ -29,6 +29,15 @@ from src.dependency_fingerprint import DependencyChecker
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def bypass_auth():
+    """Bypass auth context for all tool tests — tools are tested for logic, not auth."""
+    with patch("src.server.get_current_user", return_value={"id": "test-user"}), \
+         patch("src.server.check_permission", AsyncMock(return_value=None)), \
+         patch("src.server._check_read_access", AsyncMock(return_value=None)):
+        yield
+
+
 @pytest_asyncio.fixture
 async def svc(db):
     """Services container with real DB, mocked API-key-dependent layers."""
@@ -76,6 +85,7 @@ class TestListProjects:
     @pytest.mark.asyncio
     async def test_returns_registered_project(self, svc):
         await svc.db.upsert_project("myapp", "myapp", "/workspace/myapp")
+        svc.db.get_accessible_project_ids = AsyncMock(return_value={"myapp"})
         with patch("src.server._get_services", AsyncMock(return_value=svc)):
             from src.server import list_projects
             result = json.loads(await list_projects())
@@ -84,6 +94,7 @@ class TestListProjects:
 
     @pytest.mark.asyncio
     async def test_returns_empty_list_for_no_projects(self, svc):
+        svc.db.get_accessible_project_ids = AsyncMock(return_value=set())
         with patch("src.server._get_services", AsyncMock(return_value=svc)):
             from src.server import list_projects
             result = json.loads(await list_projects())
