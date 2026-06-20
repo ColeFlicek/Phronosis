@@ -137,22 +137,59 @@ def _ensure_base_clone(repo: str, slug: str) -> str:
     return clone_path
 
 
+def _pick_bench_python() -> str:
+    if p := os.getenv("BENCH_PYTHON"):
+        return p
+    # Prefer Python 3.9 (SWE-bench Lite tasks target Python 3.8/3.9)
+    for candidate in [
+        "/opt/miniforge/envs/py39/bin/python",
+        "/opt/miniforge/envs/py311/bin/python",
+        "python3.9",
+        "python3.10",
+        "python3.11",
+        "python3",
+    ]:
+        if candidate.startswith("/") and os.path.exists(candidate):
+            return candidate
+        elif not candidate.startswith("/"):
+            import shutil
+            if shutil.which(candidate):
+                return candidate
+    return "python3"
+
+
+_BENCH_PYTHON = _pick_bench_python()
+
+
 def _create_venv(repo_path: str) -> str:
     """Create a venv inside the worktree and install the package (best-effort)."""
     venv_dir = os.path.join(repo_path, ".bench-venv")
     python = os.path.join(venv_dir, "bin", "python")
 
     if os.path.exists(python):
-        return python  # already set up
+        # Verify the existing venv has pytest — if not, pip-bootstrap it
+        check = subprocess.run([python, "-m", "pytest", "--version"], capture_output=True)
+        if check.returncode == 0:
+            return python
+        # Venv exists but pytest is missing (created before pip was available) — add it
+        subprocess.run([python, "-m", "ensurepip", "--upgrade"], capture_output=True)
+        subprocess.run([python, "-m", "pip", "install", "--quiet", "pytest"], cwd=repo_path, capture_output=True)
+        return python
 
-    print(f"[setup] creating venv…")
-    subprocess.run(["python3", "-m", "venv", venv_dir], check=True)
+    print(f"[setup] creating venv with {_BENCH_PYTHON}…")
+    subprocess.run([_BENCH_PYTHON, "-m", "venv", venv_dir], check=True)
     subprocess.run(
         [python, "-m", "pip", "install", "--quiet", "-e", ".[dev,testing]"],
         cwd=repo_path, capture_output=True,
     )
     subprocess.run(
         [python, "-m", "pip", "install", "--quiet", "pytest"],
+        cwd=repo_path, capture_output=True,
+    )
+    # Older SWE-bench repos (pre-2022) used hypothesis hooks not compatible
+    # with hypothesis>=6 (which added 'collection_path' to pytest_ignore_collect).
+    subprocess.run(
+        [python, "-m", "pip", "install", "--quiet", "hypothesis<6"],
         cwd=repo_path, capture_output=True,
     )
     return python
