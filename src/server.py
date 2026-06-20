@@ -747,7 +747,7 @@ async def check_dependency(library_name: str, project_id: str) -> str:
 
 @mcp.tool()
 async def query_similar_functions(
-    snippet: str, top_k: int = 10, project_id: str = ""
+    snippet: str, project_id: str, top_k: int = 10
 ) -> str:
     """
     [DISCOVERY TOOL — accepts natural language or a code snippet]
@@ -760,7 +760,7 @@ async def query_similar_functions(
     looking for in plain English and this tool finds it.  Once you have the
     function name, switch to get_function_context for the full picture.
 
-    project_id: limit results to a specific project. If omitted, searches across all projects.
+    project_id: required — scope results to this project. Pass "" to search across all projects.
     """
     svcs = await _get_services()
     await _check_read_access(project_id, svcs.db)
@@ -810,7 +810,7 @@ async def log_decision(
 
 
 @mcp.tool()
-async def get_decision_history(function_name: str, project_id: str = "") -> str:
+async def get_decision_history(function_name: str, project_id: str) -> str:
     """
     [EXECUTION TOOL — accepts a symbol name]
 
@@ -818,7 +818,7 @@ async def get_decision_history(function_name: str, project_id: str = "") -> str:
     Design, Implementation, and Patch decision linked to it, in chronological
     order. Call this before touching any function you did not write.
 
-    project_id: limit results to a specific project. If omitted, searches all projects.
+    project_id: required — scope results to this project. Pass "" to search all projects.
     """
     from .guidance import compute_decision_guidance
     svcs = await _get_services()

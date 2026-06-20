@@ -1604,7 +1604,7 @@ class CallGraphDB:
     ) -> bool:
         """Return True if user_id may perform operation on project_id.
 
-        Demo projects: any authenticated user may read; write is denied.
+        Demo projects: any authenticated user may read or write.
         Private projects: owner role allows read and write; viewer allows read only.
         """
         async with self._db.execute(
@@ -1613,7 +1613,7 @@ class CallGraphDB:
             is_demo = await cur.fetchone() is not None
 
         if is_demo:
-            return operation == "read"
+            return True
 
         async with self._db.execute(
             "SELECT role FROM project_access WHERE user_id = ? AND project_id = ?",

@@ -84,8 +84,9 @@ def build_prompt_b(task: BenchmarkTask, ctx: RepoContext) -> str:
         ## Instructions
 
         1. Call `get_project_home("{ctx.project_id}")` for an architectural overview.
-        2. Use `query_similar_functions` to find the relevant code.
+        2. Use `query_similar_functions` to find the relevant code. Always pass project_id="{ctx.project_id}".
         3. Use `get_callers` / `get_callees` / `get_impact_radius` before editing.
+           When calling `get_decision_history`, always pass project_id="{ctx.project_id}".
         4. Apply a minimal fix.
         5. Verify with: `{ctx.venv_python} -m pytest {' '.join(task.fail_to_pass[:3])}`
         6. When all failing tests pass, stop. The orchestrator will capture your diff.
