@@ -13,7 +13,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
-from starlette.exceptions import HTTPException
+from starlette.exceptions import HTTPException  # noqa: F401
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 

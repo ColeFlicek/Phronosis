@@ -181,7 +181,7 @@ class TestListExternalDependencies:
         with patch("src.server._get_services", AsyncMock(return_value=svc)):
             from src.server import list_external_dependencies
             result = json.loads(await list_external_dependencies("proj"))
-        assert result == []
+        assert result["results"] == []
 
     @pytest.mark.asyncio
     async def test_caller_count_reflects_how_many_internal_functions_call_symbol(self, svc):
@@ -226,7 +226,7 @@ class TestGetLibraryDependents:
         with patch("src.server._get_services", AsyncMock(return_value=svc)):
             from src.server import get_library_dependents
             result = json.loads(await get_library_dependents("requests", "proj"))
-        assert result == []
+        assert result["results"] == []
 
     @pytest.mark.asyncio
     async def test_does_not_return_external_stubs_as_dependents(self, svc):
@@ -238,7 +238,7 @@ class TestGetLibraryDependents:
         with patch("src.server._get_services", AsyncMock(return_value=svc)):
             from src.server import get_library_dependents
             result = json.loads(await get_library_dependents("requests", "proj"))
-        assert result == []
+        assert result["results"] == []
 
 
 # ── Dependency fingerprint tools ──────────────────────────────────────────────
