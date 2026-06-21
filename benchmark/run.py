@@ -244,6 +244,199 @@ def cmd_summary(args) -> None:
     print_summary(summary)
 
 
+# ── MCP connectivity check ─────────────────────────────────────────────────────
+
+def cmd_check_mcp(args) -> None:
+    """
+    Simulate the exact MCP handshake a Claude Code subagent performs.
+
+    A passing run proves that subagents will have Phronosis tools available.
+    A failing run blocks the benchmark with a clear diagnostic so you don't
+    waste tokens on a Path B run that silently degrades to grep.
+
+    Steps mirror the Claude Code MCP client lifecycle:
+      1. POST /mcp  initialize          → must return mcp-session-id header
+      2. POST /mcp  notifications/initialized (no-response notification)
+      3. POST /mcp  tools/list          → must list ≥1 Phronosis tool
+      4. POST /mcp  tools/call          → list_projects must return valid JSON
+    """
+    import http.client
+    import urllib.parse
+
+    url = args.mcp_url
+    api_key = args.api_key or os.getenv("PHRONOSIS_API_KEY", "")
+
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/mcp"
+
+    failures: list[str] = []
+    session_id: str = ""
+
+    def post(method: str, params: dict | None = None, sid: str = "") -> tuple[int, dict, dict]:
+        """Return (status, headers_dict, body_dict). body_dict is {} on parse failure."""
+        payload = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params or {},
+        }).encode()
+        hdrs = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Content-Length": str(len(payload)),
+        }
+        if api_key:
+            hdrs["X-API-Key"] = api_key
+        if sid:
+            hdrs["mcp-session-id"] = sid
+
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", path, body=payload, headers=hdrs)
+        resp = conn.getresponse()
+        status = resp.status
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        raw = resp.read().decode(errors="replace")
+        conn.close()
+
+        # SSE wraps the JSON: "event: message\ndata: {...}"
+        body: dict = {}
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                try:
+                    body = json.loads(line[5:].strip())
+                    break
+                except json.JSONDecodeError:
+                    pass
+        if not body:
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        return status, resp_headers, body
+
+    ok = "\033[32m✔\033[0m" if not args.no_color else "OK"
+    fail = "\033[31m✘\033[0m" if not args.no_color else "FAIL"
+
+    print(f"MCP connectivity check → {url}")
+    print()
+
+    # ── Step 1: initialize ────────────────────────────────────────────────────
+    print(f"  [1/4] initialize ...", end=" ", flush=True)
+    try:
+        status, hdrs, body = post("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "phronosis-bench-check", "version": "1.0"},
+        })
+        if status != 200:
+            print(fail)
+            failures.append(f"initialize: HTTP {status}")
+        elif "error" in body:
+            print(fail)
+            failures.append(f"initialize: {body['error']}")
+        else:
+            session_id = hdrs.get("mcp-session-id", "")
+            if not session_id:
+                print(fail)
+                failures.append(
+                    "initialize: no mcp-session-id header returned — server is in "
+                    "stateless_http=True mode; subagents cannot maintain sessions. "
+                    "Fix: set stateless_http=False and redeploy."
+                )
+            else:
+                server_name = body.get("result", {}).get("serverInfo", {}).get("name", "?")
+                print(f"{ok}  session={session_id[:12]}…  server={server_name}")
+    except Exception as exc:
+        print(fail)
+        failures.append(f"initialize: {exc}")
+
+    # ── Step 2: notifications/initialized ────────────────────────────────────
+    print(f"  [2/4] notifications/initialized ...", end=" ", flush=True)
+    try:
+        # This is a JSON-RPC notification (no id, no response expected)
+        import http.client as _hc
+        payload = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode()
+        hdrs2: dict = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Content-Length": str(len(payload)),
+        }
+        if api_key:
+            hdrs2["X-API-Key"] = api_key
+        if session_id:
+            hdrs2["mcp-session-id"] = session_id
+        conn2 = _hc.HTTPConnection(host, port, timeout=10)
+        conn2.request("POST", path, body=payload, headers=hdrs2)
+        resp2 = conn2.getresponse()
+        resp2.read()
+        conn2.close()
+        # 200 or 202 both acceptable for notifications
+        if resp2.status in (200, 202, 204):
+            print(ok)
+        else:
+            print(f"{ok}  (status={resp2.status} — acceptable)")
+    except Exception as exc:
+        # Non-fatal: notification delivery is best-effort
+        print(f"{ok}  (skipped: {exc})")
+
+    # ── Step 3: tools/list ────────────────────────────────────────────────────
+    print(f"  [3/4] tools/list ...", end=" ", flush=True)
+    tool_names: list[str] = []
+    try:
+        status, _, body = post("tools/list", {}, sid=session_id)
+        tools = body.get("result", {}).get("tools", [])
+        tool_names = [t.get("name", "") for t in tools]
+        phronosis_tools = [n for n in tool_names if n in {
+            "get_project_home", "query_similar_functions", "get_impact_radius",
+            "get_callers", "get_callees", "get_decision_history", "list_projects",
+        }]
+        if not phronosis_tools:
+            print(fail)
+            failures.append(
+                f"tools/list: no Phronosis tools in response "
+                f"(got {len(tool_names)} tools total: {tool_names[:5]})"
+            )
+        else:
+            print(f"{ok}  {len(phronosis_tools)} Phronosis tools visible")
+    except Exception as exc:
+        print(fail)
+        failures.append(f"tools/list: {exc}")
+
+    # ── Step 4: tool call ─────────────────────────────────────────────────────
+    print(f"  [4/4] tools/call list_projects ...", end=" ", flush=True)
+    try:
+        status, _, body = post("tools/call", {
+            "name": "list_projects",
+            "arguments": {},
+        }, sid=session_id)
+        if "error" in body:
+            print(fail)
+            failures.append(f"tools/call: {body['error']}")
+        else:
+            result = body.get("result", {})
+            print(f"{ok}  got result (type={type(result).__name__})")
+    except Exception as exc:
+        print(fail)
+        failures.append(f"tools/call: {exc}")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print()
+    if failures:
+        print(f"  {fail}  MCP check FAILED — Path B benchmark blocked")
+        print()
+        for f in failures:
+            print(f"     • {f}")
+        print()
+        print("  Subagents will NOT have Phronosis tools. Fix the above before")
+        print("  running Path B or results will be identical to Path A.")
+        sys.exit(1)
+    else:
+        print(f"  {ok}  MCP check PASSED — subagents will have Phronosis tools")
+        sys.exit(0)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phronosis SWE-bench benchmark CLI")
     parser.add_argument("--repo", default="pytest-dev/pytest")
@@ -266,6 +459,26 @@ def main() -> None:
 
     sub.add_parser("summary", help="Print aggregate results")
 
+    p_check = sub.add_parser(
+        "check-mcp",
+        help="Verify MCP subagent connectivity before running Path B benchmarks",
+    )
+    p_check.add_argument(
+        "--mcp-url",
+        default=os.getenv("PHRONOSIS_URL", "http://100.71.88.106:3004") + "/mcp",
+        help="MCP endpoint to test (default: $PHRONOSIS_URL/mcp)",
+    )
+    p_check.add_argument(
+        "--api-key",
+        default=None,
+        help="X-API-Key value (default: $PHRONOSIS_API_KEY)",
+    )
+    p_check.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Plain ASCII output (for CI logs)",
+    )
+
     p_metrics = sub.add_parser("metrics", help="Record agent token/tool metrics before evaluate")
     p_metrics.add_argument("instance_id")
     p_metrics.add_argument("--path", choices=["a", "b"], required=True)
@@ -286,6 +499,8 @@ def main() -> None:
         cmd_evaluate(args)
     elif args.command == "metrics":
         cmd_metrics(args)
+    elif args.command == "check-mcp":
+        cmd_check_mcp(args)
     elif args.command == "summary":
         cmd_summary(args)
 
