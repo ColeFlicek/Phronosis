@@ -667,6 +667,30 @@ async def _co_change_hints(
             if len([h for h in hints if h["type"] == "semantic_sibling"]) >= 3:
                 break
 
+    # ── Git co-change history ─────────────────────────────────────────────────
+    # Functions that appear together with this one in the same commits — empirical
+    # coupling derived from actual change history, not hardcoded rules. Silent when
+    # commit_function_changes is empty (new projects or before backfill runs).
+    try:
+        co_changed = await db.get_co_change_functions(
+            target_id, project_id or "", min_count=3, limit=5
+        )
+    except Exception:
+        co_changed = []
+    for entry in co_changed:
+        cid = entry.get("function_id", "")
+        if cid and cid not in impact_ids and cid != target_id:
+            hints.append({
+                "type": "co_change_history",
+                "message": (
+                    f"`{cid.split('.')[-1]}` has changed together with `{target_name}` "
+                    f"{entry['co_change_count']} times in git history — likely needs "
+                    f"a parallel update."
+                ),
+                "id": cid,
+                "co_change_count": entry["co_change_count"],
+            })
+
     return hints
 
 
@@ -2096,4 +2120,4 @@ async def http_enrich_summaries(request: Request) -> JSONResponse:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=3004, stateless_http=True)
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=3004, stateless_http=False)

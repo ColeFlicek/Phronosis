@@ -297,6 +297,60 @@ class CallGraphDB:
 
         return classify_conflicts(rows)
 
+    async def record_commit_changes(
+        self,
+        project_id: str,
+        commit_hash: str,
+        function_ids: list[str],
+        branch: str = "",
+        changed_at: str = "",
+    ) -> None:
+        """Log which functions changed in a specific commit. Append-only — preserves history."""
+        if not commit_hash or not function_ids:
+            return
+        ts = changed_at or datetime.now(timezone.utc).isoformat()
+        await self._db.executemany(
+            """INSERT INTO commit_function_changes
+                   (project_id, commit_hash, function_id, branch, changed_at)
+               VALUES(?, ?, ?, ?, ?)
+               ON CONFLICT(project_id, commit_hash, function_id) DO NOTHING""",
+            [(project_id, commit_hash, fn_id, branch, ts) for fn_id in function_ids],
+        )
+        await self._db.commit()
+
+    async def get_co_change_functions(
+        self,
+        function_id: str,
+        project_id: str,
+        min_count: int = 3,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Find functions that frequently change in the same commits as function_id.
+
+        Queries commit_function_changes for functions that appear in the same commit
+        as function_id at least min_count times. Returns [] when the table is empty
+        or function_id has no commit history — callers must handle this gracefully.
+
+        Returns list of {function_id, co_change_count} ordered by count descending.
+        """
+        async with self._db.execute(
+            """SELECT other.function_id, COUNT(*) AS co_change_count
+               FROM commit_function_changes mine
+               JOIN commit_function_changes other
+                 ON other.project_id = mine.project_id
+                AND other.commit_hash = mine.commit_hash
+                AND other.function_id != mine.function_id
+               WHERE mine.project_id = ?
+                 AND mine.function_id = ?
+               GROUP BY other.function_id
+               HAVING COUNT(*) >= ?
+               ORDER BY co_change_count DESC
+               LIMIT ?""",
+            (project_id, function_id, min_count, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def rename_project(self, project_id: str, new_name: str) -> bool:
         """Update the display name of a project. Returns False if project not found."""
         async with self._db.execute(

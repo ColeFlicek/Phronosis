@@ -37,9 +37,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from benchmark.loader import load_tasks_chronological, load_multifile_tasks, select_calibration_tasks
+from benchmark.loader import load_tasks_chronological, load_multifile_tasks, load_path_a_hard_tasks, select_calibration_tasks
 from benchmark.repo_setup import setup_repo, cleanup_repo, RepoContext
-from benchmark.runner import capture_patch, save_patch, AgentResult
+from benchmark.runner import capture_patch, save_patch, AgentResult, parse_tool_log
 from benchmark.evaluator import evaluate
 from benchmark.report import write_task_results, write_summary, print_summary
 
@@ -75,8 +75,23 @@ def cmd_list(args) -> None:
 
 
 def cmd_setup(args) -> None:
-    tasks = load_tasks_chronological(repo=args.repo)
-    task = next((t for t in tasks if t.instance_id == args.instance_id), None)
+    # Check saved task.json first — avoids a slow HF download for Full-only tasks.
+    task = None
+    saved = Path(args.results_dir) / args.instance_id / "task.json"
+    if saved.exists():
+        from benchmark.loader import BenchmarkTask
+        data = json.loads(saved.read_text())
+        task = BenchmarkTask(
+            instance_id=data["instance_id"],
+            repo=data["repo"],
+            base_commit=data["base_commit"],
+            problem_statement=data["problem_statement"],
+            fail_to_pass=data["fail_to_pass"],
+            pass_to_pass=data.get("pass_to_pass", []),
+        )
+    if task is None:
+        tasks = load_tasks_chronological(repo=args.repo)
+        task = next((t for t in tasks if t.instance_id == args.instance_id), None)
     if not task:
         print(f"ERROR: task {args.instance_id!r} not found", file=sys.stderr)
         sys.exit(1)
@@ -137,10 +152,12 @@ def cmd_evaluate(args) -> None:
 
     tool_calls_raw = metrics.get("tool_calls", [])
     if isinstance(tool_calls_raw, int):
-        # stored as count (from `metrics` subcommand) — reconstruct minimal list
-        tool_calls_list = [{"name": "tool"} for _ in range(tool_calls_raw)]
+        tool_calls_list = [{"tool": "unknown"} for _ in range(tool_calls_raw)]
+    elif isinstance(tool_calls_raw, list) and tool_calls_raw and isinstance(tool_calls_raw[0], str):
+        # legacy: plain list of names
+        tool_calls_list = [{"tool": n, "reason": ""} for n in tool_calls_raw]
     else:
-        tool_calls_list = [{"name": n} for n in tool_calls_raw]
+        tool_calls_list = tool_calls_raw  # already list[dict]
 
     agent_result = AgentResult(
         instance_id=task.instance_id,
@@ -149,6 +166,7 @@ def cmd_evaluate(args) -> None:
         tool_calls=tool_calls_list,
         iterations=metrics.get("iterations", 0),
         submitted=bool(patch.strip()),
+        notes=metrics.get("notes", ""),
         agent_tokens=metrics.get("agent_tokens", 0),
     )
 
@@ -159,6 +177,16 @@ def cmd_evaluate(args) -> None:
         venv_python=ctx_data["venv_python"],
     )
 
+    # Per-tool breakdown for analysis
+    phronosis_tools = {
+        "get_project_home", "query_similar_functions", "get_impact_radius",
+        "get_callers", "get_callees", "get_subsystem_detail",
+        "get_decision_history", "query_decisions",
+    }
+    tool_names = [e.get("tool", "unknown") for e in agent_result.tool_calls]
+    phronosis_calls = [e for e in agent_result.tool_calls if e.get("tool") in phronosis_tools]
+    file_read_calls = [e for e in agent_result.tool_calls if e.get("tool") in ("Read", "Bash")]
+
     out = path_dir / "evaluation.json"
     out.write_text(json.dumps({
         "resolved": result.resolved,
@@ -168,6 +196,10 @@ def cmd_evaluate(args) -> None:
         "error": result.error,
         "agent_tokens": agent_result.agent_tokens,
         "tool_call_count": len(agent_result.tool_calls),
+        "phronosis_call_count": len(phronosis_calls),
+        "file_read_count": len(file_read_calls),
+        "notes": agent_result.notes,
+        "tool_log": agent_result.tool_calls,
     }, indent=2))
 
     print(json.dumps({
@@ -175,17 +207,33 @@ def cmd_evaluate(args) -> None:
         "tests_passed": result.tests_passed,
         "tests_failed": result.tests_failed,
         "error": result.error,
+        "phronosis_calls": len(phronosis_calls),
+        "file_reads": len(file_read_calls),
     }))
 
 
 def cmd_metrics(args) -> None:
-    """Write agent metrics (tokens, tool calls) for one path so evaluate can pick them up."""
+    """Write agent metrics (tokens, tool calls, notes) for one path so evaluate can pick them up."""
     path_dir = Path(args.results_dir) / args.instance_id / f"path_{args.path}"
     path_dir.mkdir(parents=True, exist_ok=True)
+    raw = args.tool_calls
+    try:
+        tool_calls = json.loads(raw)  # JSON array — either strings or {tool, reason, ...} dicts
+    except (json.JSONDecodeError, TypeError):
+        tool_calls = int(raw)         # plain int count (backwards compat)
+
+    # If the orchestrator passes raw agent output instead of extracted JSON, parse it
+    if isinstance(tool_calls, str):
+        parsed, notes = parse_tool_log(tool_calls)
+        tool_calls = parsed
+    else:
+        notes = args.notes
+
     metrics = {
         "agent_tokens": args.tokens,
-        "tool_calls": args.tool_calls,
+        "tool_calls": tool_calls,
         "iterations": args.iterations,
+        "notes": notes,
     }
     (path_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print(json.dumps({"written": str(path_dir / "metrics.json")}))
@@ -222,8 +270,11 @@ def main() -> None:
     p_metrics.add_argument("instance_id")
     p_metrics.add_argument("--path", choices=["a", "b"], required=True)
     p_metrics.add_argument("--tokens", type=int, default=0)
-    p_metrics.add_argument("--tool-calls", type=int, default=0, dest="tool_calls")
+    p_metrics.add_argument("--tool-calls", default="0", dest="tool_calls",
+                           help="int count, JSON array of names, or JSON array of {tool,reason} dicts")
     p_metrics.add_argument("--iterations", type=int, default=0)
+    p_metrics.add_argument("--notes", default="",
+                           help="agent's one-sentence summary of what it found")
 
     args = parser.parse_args()
 

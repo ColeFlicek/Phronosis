@@ -7,7 +7,9 @@ git worktree per task. Avoids re-downloading the full repo for every task.
 """
 from __future__ import annotations
 
+import asyncio
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -45,7 +47,7 @@ def setup_repo(
     *,
     phronosis_index: bool = False,
     workdir: str | None = None,
-    phronosis_dsn: str = "",  # unused — kept for compat
+    phronosis_dsn: str = "",
 ) -> RepoContext:
     """
     Set up an isolated working directory for a benchmark task.
@@ -78,7 +80,7 @@ def setup_repo(
     project_id = ""
     indexed = False
     if phronosis_index:
-        project_id = _ensure_indexed(task, worktree_path)
+        project_id = _ensure_indexed(task, worktree_path, base_clone, dsn=phronosis_dsn)
         indexed = True
 
     return RepoContext(
@@ -210,11 +212,12 @@ def _create_venv(repo_path: str) -> str:
     return python
 
 
-def _ensure_indexed(task: BenchmarkTask, repo_path: str) -> str:
+def _ensure_indexed(task: BenchmarkTask, repo_path: str, base_clone: str, *, dsn: str = "") -> str:
     """
     Index the repo with Phronosis via /api/index-bulk.
     Only sends src/**/*.py files — test files are not needed for call graph nav.
     Reuses the index if this commit was already indexed this session.
+    If dsn is provided, seeds co_change history from the canonical source project.
     """
     commit = task.base_commit
     if commit in _indexed_commits:
@@ -271,4 +274,209 @@ def _ensure_indexed(task: BenchmarkTask, repo_path: str) -> str:
 
     print(f"[setup] indexed {total_fns} functions")
     _indexed_commits[commit] = project_id
+
+    if dsn:
+        # Source project: derive from repo name (e.g. "django/django" → "django")
+        source_project_id = task.repo.split("/")[-1]
+        _seed_cochange(
+            dsn=dsn,
+            bench_project_id=project_id,
+            source_project_id=source_project_id,
+            base_commit=commit,
+            base_clone_path=base_clone,
+            worktree_path=repo_path,
+        )
+
     return project_id
+
+
+# ── Co-change seeding ─────────────────────────────────────────────────────────
+
+def _file_hash_at_commit(repo_path: str, commit: str, rel_path: str) -> str | None:
+    """SHA256 of a file at a specific git commit. None if path doesn't exist at that commit."""
+    try:
+        content = subprocess.check_output(
+            ["git", "show", f"{commit}:{rel_path}"],
+            cwd=repo_path,
+            stderr=subprocess.DEVNULL,
+        )
+        return hashlib.sha256(content).hexdigest()
+    except Exception:
+        return None
+
+
+def _file_hash_on_disk(abs_path: str) -> str | None:
+    """SHA256 of a file on disk. None if unreadable."""
+    try:
+        return hashlib.sha256(Path(abs_path).read_bytes()).hexdigest()
+    except Exception:
+        return None
+
+
+def _seed_cochange(
+    *,
+    dsn: str,
+    bench_project_id: str,
+    source_project_id: str,
+    base_commit: str,
+    base_clone_path: str,
+    worktree_path: str,
+    min_count: int = 3,
+) -> None:
+    """
+    Copy co_change history from source_project into bench_project, gated by:
+
+    1. Ancestor filter — only commits reachable from base_commit (no future data).
+    2. Hash check — for each function in a co_change row, the file on disk at
+       base_commit must be byte-identical to the file at the most recent co_change
+       commit. If the hashes differ the function was refactored since it last
+       co_changed, and its historical coupling signal is stale.
+    """
+    try:
+        asyncio.run(_seed_cochange_async(
+            dsn=dsn,
+            bench_project_id=bench_project_id,
+            source_project_id=source_project_id,
+            base_commit=base_commit,
+            base_clone_path=base_clone_path,
+            worktree_path=worktree_path,
+            min_count=min_count,
+        ))
+    except Exception as exc:
+        print(f"[cochange] seed failed (non-fatal): {exc}")
+
+
+async def _seed_cochange_async(
+    *,
+    dsn: str,
+    bench_project_id: str,
+    source_project_id: str,
+    base_commit: str,
+    base_clone_path: str,
+    worktree_path: str,
+    min_count: int,
+) -> None:
+    try:
+        import asyncpg
+    except ImportError:
+        print("[cochange] asyncpg not available — skipping co_change seed")
+        return
+
+    # ── Step 1: ancestor commits in reverse-chronological order (newest first) ──
+    raw = subprocess.check_output(
+        ["git", "log", "--format=%H", base_commit],
+        cwd=base_clone_path, stderr=subprocess.DEVNULL,
+    ).decode()
+    ancestors: list[str] = [h for h in raw.splitlines() if h.strip()]
+    ancestor_set = set(ancestors)
+    if not ancestors:
+        print(f"[cochange] no ancestors found for {base_commit[:8]}")
+        return
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        # ── Step 2: bench project function IDs → absolute file paths ──────────
+        bench_rows = await conn.fetch(
+            "SELECT id, file FROM nodes WHERE project_id = $1 AND is_external = 0",
+            bench_project_id,
+        )
+        bench_fn_file: dict[str, str] = {r["id"]: r["file"] for r in bench_rows}
+        if not bench_fn_file:
+            print(f"[cochange] {bench_project_id} has no indexed functions — skipping")
+            return
+
+        # ── Step 3: pull co_change rows for source project × bench functions ──
+        src_rows = await conn.fetch(
+            """SELECT commit_hash, function_id
+               FROM commit_function_changes
+               WHERE project_id = $1 AND function_id = ANY($2)""",
+            source_project_id, list(bench_fn_file.keys()),
+        )
+        # Keep only ancestor commits; build fn_id → set(commits)
+        fn_commits: dict[str, set[str]] = {}
+        for r in src_rows:
+            if r["commit_hash"] in ancestor_set:
+                fn_commits.setdefault(r["function_id"], set()).add(r["commit_hash"])
+
+        if not fn_commits:
+            print(
+                f"[cochange] no history for {source_project_id} functions "
+                f"in ancestors of {base_commit[:8]} — backfill may not cover this repo"
+            )
+            return
+
+        # ── Step 4: find the most-recent co_change commit per function ─────────
+        # ancestors is newest-first; first hit is the latest co_change commit.
+        # Build a reverse index for O(1) lookups inside the loop.
+        commit_to_fns: dict[str, set[str]] = {}
+        for fn_id, commits in fn_commits.items():
+            for c in commits:
+                commit_to_fns.setdefault(c, set()).add(fn_id)
+
+        fn_last_commit: dict[str, str] = {}
+        remaining = set(fn_commits.keys())
+        for ancestor in ancestors:
+            if not remaining:
+                break
+            for fn_id in commit_to_fns.get(ancestor, set()) & remaining:
+                fn_last_commit[fn_id] = ancestor
+                remaining.discard(fn_id)
+
+        # ── Step 5: hash check — skip functions refactored since last co_change ─
+        # Also enforce min_count: functions that co-changed fewer times than the
+        # threshold are likely coincidental and carry no reliable coupling signal.
+        valid_fns: set[str] = set()
+        stale_count = 0
+        missing_count = 0
+
+        for fn_id, last_commit in fn_last_commit.items():
+            if len(fn_commits.get(fn_id, set())) < min_count:
+                missing_count += 1
+                continue
+            abs_file = bench_fn_file.get(fn_id)
+            if not abs_file:
+                missing_count += 1
+                continue
+
+            rel_path = os.path.relpath(abs_file, worktree_path)
+
+            hash_now = _file_hash_on_disk(abs_file)
+            hash_then = _file_hash_at_commit(base_clone_path, last_commit, rel_path)
+
+            if hash_now is None or hash_then is None:
+                missing_count += 1
+                continue
+
+            if hash_now == hash_then:
+                valid_fns.add(fn_id)
+            else:
+                stale_count += 1
+
+        print(
+            f"[cochange] hash check: {len(valid_fns)} valid, "
+            f"{stale_count} stale (refactored since last co_change), "
+            f"{missing_count} unresolvable"
+        )
+
+        if not valid_fns:
+            return
+
+        # ── Step 6: copy rows for valid functions only ─────────────────────────
+        to_copy = [
+            (bench_project_id, r["commit_hash"], r["function_id"], "", "")
+            for r in src_rows
+            if r["function_id"] in valid_fns and r["commit_hash"] in ancestor_set
+        ]
+
+        if to_copy:
+            await conn.executemany(
+                """INSERT INTO commit_function_changes
+                       (project_id, commit_hash, function_id, branch, changed_at)
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (project_id, commit_hash, function_id) DO NOTHING""",
+                to_copy,
+            )
+            print(f"[cochange] seeded {len(to_copy):,} rows into {bench_project_id}")
+
+    finally:
+        await conn.close()

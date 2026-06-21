@@ -253,5 +253,22 @@ CREATE TABLE IF NOT EXISTS module_patterns (
     PRIMARY KEY (project_id, module)
 );
 
+-- Per-commit function change log. Populated by backfill_cochange.py and future
+-- index_project runs. One row per (project, commit, function) — preserves full
+-- history so co-change queries can find functions that appear together across commits.
+-- Unlike branch_function_changes (which upserts and loses history), this table is
+-- append-only: the primary key prevents duplicates without overwriting prior rows.
+CREATE TABLE IF NOT EXISTS commit_function_changes (
+    project_id   TEXT NOT NULL,
+    commit_hash  TEXT NOT NULL,
+    function_id  TEXT NOT NULL,
+    branch       TEXT NOT NULL DEFAULT '',
+    changed_at   TEXT NOT NULL,
+    PRIMARY KEY (project_id, commit_hash, function_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cfc_project_function ON commit_function_changes(project_id, function_id);
+CREATE INDEX IF NOT EXISTS idx_cfc_project_commit   ON commit_function_changes(project_id, commit_hash);
+
 -- Migrations (safe to re-run — IF NOT EXISTS / IF EXISTS guards)
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at TEXT;

@@ -125,6 +125,85 @@ INDEXED_REPOS = {
 }
 
 
+# Tasks where grep-based Path A is structurally likely to fail.
+# Three categories:
+#   1. protocol_pair   — fix requires adding a method pair (__eq__+__hash__, etc.)
+#                        Phronosis fires `protocol_completeness` co_change_hint.
+#   2. visitor_pattern — method dispatched by name (_print_X, _visit_X); doesn't
+#                        exist yet so grep finds nothing. Phronosis finds the right
+#                        class and existing pattern via semantic search.
+#   3. sibling_class   — same bug in 2+ sibling classes; problem statement mentions
+#                        one. Phronosis `semantic_sibling` hint surfaces the others.
+_PATH_A_HARD_TASKS: dict[str, list[str]] = {
+    "protocol_pair": [
+        "django__django-13220",   # ValidationError needs __eq__ + __hash__
+        "django__django-13606",   # Lookup needs __eq__ + __hash__ (+ NOT EXISTS)
+        "django__django-14672",   # ManyToManyRel missing make_hashable / __hash__
+        "django__django-14915",   # ModelChoiceIteratorValue needs __hash__
+        "django__django-11964",   # TextChoices/IntegerChoices __str__ broken
+    ],
+    "visitor_pattern": [
+        "sympy__sympy-11400",     # CCodePrinter missing _print_Relational, _print_sinc
+        "sympy__sympy-12171",     # printer missing _print_Derivative
+        "sympy__sympy-15308",     # LaTeXPrinter missing _print_Basic, _print_Trace
+        "sympy__sympy-16106",     # MathMLPrinter missing _print_tuple, _print_Indexed*
+        "sympy__sympy-17022",     # NumPyPrinter missing _print_Identity
+        "sympy__sympy-20639",     # printer missing _print_nth_root
+        "sympy__sympy-21171",     # LaTeXPrinter missing _print_SingularityFunction
+        "pytest-dev__pytest-5103",# assertion rewriter missing _visit_all
+    ],
+    "sibling_class": [
+        "django__django-16041",          # FormsFormset + Jinja2FormsFormset same bug
+        "django__django-16379",          # FileBasedCache + FileBasedCachePathLib same bug
+        "scikit-learn__scikit-learn-14983",  # RepeatedKFold + RepeatedStratifiedKFold need __repr__
+    ],
+}
+
+
+def load_path_a_hard_tasks(
+    categories: list[str] | None = None,
+    cache_dir: str | None = None,
+) -> list[BenchmarkTask]:
+    """
+    Load the curated set of tasks where grep-based Path A is structurally likely
+    to fail and Phronosis Path B has a clear advantage.
+
+    categories: subset of ["protocol_pair", "visitor_pattern", "sibling_class"].
+                Default: all three.
+
+    Tasks are returned in a stable order: protocol_pair first, then
+    visitor_pattern, then sibling_class.
+    """
+    from datasets import load_dataset
+
+    target_ids: list[str] = []
+    for cat in (categories or list(_PATH_A_HARD_TASKS)):
+        target_ids.extend(_PATH_A_HARD_TASKS.get(cat, []))
+
+    target_set = set(target_ids)
+
+    ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test", cache_dir=cache_dir)
+    by_id: dict[str, BenchmarkTask] = {}
+
+    for row in ds:
+        if row["instance_id"] not in target_set:
+            continue
+        fail = _parse_list(row["FAIL_TO_PASS"])
+        if not fail:
+            continue
+        by_id[row["instance_id"]] = BenchmarkTask(
+            instance_id=row["instance_id"],
+            repo=row["repo"],
+            base_commit=row["base_commit"],
+            problem_statement=row["problem_statement"],
+            fail_to_pass=fail,
+            pass_to_pass=_parse_list(row["PASS_TO_PASS"]),
+        )
+
+    # Return in the stable category order defined above
+    return [by_id[iid] for iid in target_ids if iid in by_id]
+
+
 def load_multifile_tasks(
     repos: list[str] | None = None,
     min_files: int = 2,

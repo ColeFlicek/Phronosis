@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "phronosis": {
+      "type": "http",
+      "url": "http://100.71.88.106:3004/mcp"
+    }
+  }
+}

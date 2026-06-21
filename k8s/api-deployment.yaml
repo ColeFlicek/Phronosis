@@ -7,6 +7,10 @@ spec:
   type: NodePort
   selector:
     app: phronosis-api
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
   ports:
     - port: 3004
       targetPort: 3004
