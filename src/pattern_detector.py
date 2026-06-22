@@ -37,13 +37,21 @@ def _decorators(node: dict) -> list[str]:
         return []
 
 
+_RAISE_NIE_RE = re.compile(r"^\s*raise\s+NotImplementedError\b", re.MULTILINE)
+
+
 def _is_abstract(node: dict) -> bool:
     """Return True if this method is abstract — either by @abstractmethod decorator
-    or by a body that only raises NotImplementedError (Python's informal abstract hook)."""
+    or by a body that raises NotImplementedError as a statement.
+
+    Uses a line-anchored regex rather than a substring check to avoid false
+    positives when the text 'raise NotImplementedError' appears inside a string
+    literal or a docstring prose description.
+    """
     if "abstractmethod" in _decorators(node):
         return True
     body = node.get("body") or ""
-    return "raise NotImplementedError" in body
+    return bool(_RAISE_NIE_RE.search(body))
 
 
 def _is_pass_only(body: str) -> bool:
