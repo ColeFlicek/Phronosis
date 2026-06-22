@@ -474,8 +474,8 @@ async def _detect_observer(node: dict, db, project_id: str | None) -> list[Patte
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 _SINGLETON_ACCESS = frozenset({
-    "get_instance", "getInstance", "instance", "shared_instance", "get_singleton",
-    "shared", "default", "current", "get_default",
+    "get_instance", "getInstance", "instance", "shared_instance",
+    "get_singleton", "singleton", "get_shared_instance",
 })
 
 
