@@ -698,39 +698,47 @@ async def _co_change_hints(
                     target_class = ".".join(target_id.split(".")[:-1])
                     all_elements = set().union(*by_class.values())
 
-                    # Case A: target is an existing handler — surface sibling visitors
-                    # that lack a handler for the same element type
                     if target_class in by_class:
-                        missing_in = [
-                            cls for cls, handled in by_class.items()
-                            if cls != target_class and element_type not in handled
-                        ]
-                        if missing_in:
+                        # Surface ALL element types that are missing from this visitor
+                        # but exist in at least one sibling — not just the queried one.
+                        # This is the key: the matrix completeness contract, not
+                        # just the specific element being queried.
+                        target_missing = sorted(
+                            all_elements - by_class[target_class]
+                        )
+                        sibling_classes = [c for c in by_class if c != target_class]
+
+                        if target_missing:
                             hints.append({
                                 "type": "visitor_pattern",
                                 "reason": (
-                                    f"`{target_class}` implements the `_{verb}_*` "
-                                    f"Visitor pattern. Sibling visitors are missing "
-                                    f"`_{verb}_{element_type}`: "
-                                    + ", ".join(f"`{c}`" for c in missing_in[:4])
+                                    f"`{target_class}` implements the `_{verb}_*` Visitor "
+                                    f"but is missing handlers present in sibling visitors: "
+                                    + ", ".join(f"`_{verb}_{e}`" for e in target_missing[:6])
+                                    + (f" (+{len(target_missing)-6} more)" if len(target_missing) > 6 else "")
                                 ),
                                 "visitor_classes": list(by_class.keys()),
-                                "element_type": element_type,
-                                "missing_in": missing_in,
-                                "action": f"add `_{verb}_{element_type}` to each missing visitor",
+                                "missing_handlers": [f"_{verb}_{e}" for e in target_missing],
+                                "action": (
+                                    f"add the missing `_{verb}_*` handlers to `{target_class}` "
+                                    f"to match coverage in sibling visitors"
+                                ),
                             })
                         else:
-                            # All visitors covered — just surface the pattern membership
+                            # This visitor is fully covered — surface pattern membership
+                            # so agent knows to add to all visitors for any new element type
                             hints.append({
                                 "type": "visitor_pattern",
                                 "reason": (
                                     f"`{target_class}` is one of {len(by_class)} classes "
-                                    f"implementing the `_{verb}_*` Visitor. When adding a "
-                                    f"new element type, add `_{verb}_NewType` to all: "
-                                    + ", ".join(f"`{c}`" for c in list(by_class.keys())[:4])
+                                    f"implementing the `_{verb}_*` Visitor "
+                                    f"({len(all_elements)} element types covered). "
+                                    f"When adding a new element type, add `_{verb}_NewType` "
+                                    f"to all visitor classes: "
+                                    + ", ".join(f"`{c.split('.')[-1]}`" for c in sibling_classes[:3])
                                 ),
                                 "visitor_classes": list(by_class.keys()),
-                                "element_type": None,
+                                "missing_handlers": [],
                                 "action": "add handler to all visitor classes for any new element type",
                             })
 
