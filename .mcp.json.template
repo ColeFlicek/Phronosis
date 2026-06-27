@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "scopenos": {
+      "type": "http",
+      "url": "http://100.71.88.106:3004/mcp",
+      "headers": {
+        "X-API-Key": "YOUR_SCOPENOS_API_KEY"
+      }
+    }
+  }
+}

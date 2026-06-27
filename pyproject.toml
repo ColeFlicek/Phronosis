@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scopenos"
+version = "0.1.0"
+description = "Scopenos CLI — manage API keys and MCP configuration"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12.0",
+    "httpx>=0.27.0",
+    "tomli-w>=1.0.0",
+]
+
+[project.scripts]
+scopenos = "cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cli*"]

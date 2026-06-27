@@ -2091,6 +2091,53 @@ class CallGraphDB:
         await self._db.commit()
         return dict(row)
 
+    async def has_any_users(self) -> bool:
+        """Return True if at least one user exists. Used to lock the /setup endpoint."""
+        async with self._db.execute("SELECT 1 FROM users LIMIT 1") as cur:
+            return await cur.fetchone() is not None
+
+    async def list_api_keys(self, user_id: str) -> list[dict]:
+        """Return active API keys for user_id, newest first."""
+        async with self._db.execute(
+            """SELECT id, name, created_at, last_used
+               FROM api_keys
+               WHERE user_id = ? AND revoked_at IS NULL
+               ORDER BY created_at DESC""",
+            (user_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def revoke_api_key(self, key_id: str, user_id: str) -> bool:
+        """Revoke a key by ID, scoped to user_id. Returns True if a row was updated."""
+        now = datetime.now(timezone.utc).isoformat()
+        result = await self._db.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+            (now, key_id, user_id),
+        )
+        await self._db.commit()
+        return int(result.split()[-1]) > 0
+
+    async def revoke_key_by_raw(self, raw_key: str, user_id: str) -> str | None:
+        """Revoke the key matching raw_key for user_id. Returns the key ID, or None if not found."""
+        import hashlib
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        async with self._db.execute(
+            "SELECT id FROM api_keys WHERE key_hash = ? AND user_id = ? AND revoked_at IS NULL",
+            (key_hash, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        key_id = row["id"] if hasattr(row, "__getitem__") else row[0]
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE id = ?",
+            (now, key_id),
+        )
+        await self._db.commit()
+        return key_id
+
 
     async def get_accessible_project_ids(self, user_id: str) -> set[str]:
         """Return all project IDs this user can read: demo projects + explicitly granted projects."""

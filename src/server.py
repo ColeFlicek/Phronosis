@@ -531,6 +531,87 @@ async def http_enrich_summaries(request: Request) -> JSONResponse:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 
 
+# ── Auth management HTTP endpoints ───────────────────────────────────────────
+
+@mcp.custom_route("/setup", methods=["POST"])
+async def http_setup(request: Request) -> JSONResponse:
+    """POST /setup — first-time bootstrap.
+    Creates the first user + API key. Returns 409 once any user exists.
+    Body: {"email": "you@example.com", "name": "key name (optional)"}
+    """
+    try:
+        svcs = await _get_services()
+        if await svcs.db.has_any_users():
+            return JSONResponse(
+                {"detail": "Server already configured. Use 'scopenos auth rotate' to manage keys."},
+                status_code=409,
+            )
+        data = await request.json()
+        email = (data.get("email") or "").strip()
+        if not email:
+            return JSONResponse({"detail": "email is required"}, status_code=400)
+        name = (data.get("name") or "primary").strip()
+        user = await svcs.db.create_user(email, plan="owner")
+        key = await svcs.db.create_api_key(user["id"], name)
+        return JSONResponse({"key": key, "user_id": user["id"], "email": email})
+    except Exception as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/auth/keys", methods=["GET"])
+async def http_list_keys(request: Request) -> JSONResponse:
+    """GET /api/auth/keys — list active API keys for the authenticated user."""
+    try:
+        svcs = await _get_services()
+        user = await _require_valid_key(request, svcs.db)
+        keys = await svcs.db.list_api_keys(user["id"])
+        return JSONResponse({"keys": keys})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/auth/keys", methods=["POST"])
+async def http_create_key(request: Request) -> JSONResponse:
+    """POST /api/auth/keys — create a new API key, optionally revoking the current one.
+    Body: {"name": "...", "revoke_current": true}
+    """
+    try:
+        svcs = await _get_services()
+        user = await _require_valid_key(request, svcs.db)
+        data = await request.json()
+        name = (data.get("name") or "rotated").strip()
+        revoke_current = data.get("revoke_current", True)
+        new_key = await svcs.db.create_api_key(user["id"], name)
+        revoked_id = None
+        if revoke_current:
+            old_raw = request.headers.get("X-API-Key", "")
+            revoked_id = await svcs.db.revoke_key_by_raw(old_raw, user["id"])
+        return JSONResponse({"key": new_key, "revoked_id": revoked_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/auth/keys/{key_id}", methods=["DELETE"])
+async def http_revoke_key(request: Request) -> JSONResponse:
+    """DELETE /api/auth/keys/{key_id} — revoke a specific key by ID."""
+    try:
+        key_id = request.path_params["key_id"]
+        svcs = await _get_services()
+        user = await _require_valid_key(request, svcs.db)
+        revoked = await svcs.db.revoke_api_key(key_id, user["id"])
+        if not revoked:
+            return JSONResponse({"detail": "Key not found or already revoked"}, status_code=404)
+        return JSONResponse({"status": "revoked", "id": key_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=500)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
