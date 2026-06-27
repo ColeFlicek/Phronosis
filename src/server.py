@@ -101,12 +101,16 @@ register_routes(mcp, _get_services, email_sender=get_email_sender())
 from .tools import discovery, indexing, graph, memory, contracts, quality, dependencies
 
 discovery.register(mcp, _get_services)
-indexing.register(mcp, _get_services)
+index_project, index_changes, enrich_summaries = indexing.register(mcp, _get_services)
 graph.register(mcp, _get_services)
 memory.register(mcp, _get_services)
 contracts.register(mcp, _get_services)
 quality.register(mcp, _get_services)
 dependencies.register(mcp, _get_services)
+
+# Re-exports for backward-compat with tests (symbols moved to src/tools/ during refactor)
+from src import queue as _queue_mod  # noqa: E402
+from .tools._shared import _USER_QUEUE_DEPTH_LIMIT  # noqa: E402
 
 
 # ── Query HTTP endpoints ──────────────────────────────────────────────────────

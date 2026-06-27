@@ -106,7 +106,7 @@ async def test_index_project_returns_job_id(db, redis_conn, monkeypatch):
              contracts=MagicMock(),
              checker=DependencyChecker(),
          ))), \
-         patch("src.server.get_current_user", return_value={"id": "u1", "email": "alice@example.com"}):
+         patch("src.tools.indexing.get_current_user", return_value={"id": "u1", "email": "alice@example.com"}):
 
         from src.server import index_project
         result_json = await index_project("/some/path", "myrepo")
@@ -227,7 +227,7 @@ async def test_index_job_rejected_when_queue_depth_limit_reached(db, redis_conn,
 
     with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
          patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.server.get_current_user", return_value={"id": "u2", "email": "bob@example.com"}):
+         patch("src.tools.indexing.get_current_user", return_value={"id": "u2", "email": "bob@example.com"}):
 
         from src.server import index_project
 
@@ -273,7 +273,7 @@ async def test_enrich_summaries_returns_job_id(db, redis_conn, monkeypatch):
 
     with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
          patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.server.get_current_user", return_value={"id": "u3", "email": "carol@example.com"}):
+         patch("src.tools.indexing.get_current_user", return_value={"id": "u3", "email": "carol@example.com"}):
 
         from src.server import enrich_summaries
         result = json.loads(await enrich_summaries("repo-b"))
@@ -313,7 +313,7 @@ async def test_index_changes_runs_synchronously(db, monkeypatch):
     )
 
     with patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.server.get_current_user", return_value={"id": "u4", "email": "dave@example.com"}):
+         patch("src.tools.indexing.get_current_user", return_value={"id": "u4", "email": "dave@example.com"}):
 
         from src.server import index_changes
         result = json.loads(await index_changes(["src/foo.py"], {"src/foo.py": "def f(): pass"}, project_id="repo-c"))
@@ -358,7 +358,7 @@ async def test_rate_limit_is_per_user_not_global(db, redis_conn, monkeypatch):
     # User A starts an indexing job
     with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
          patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.server.get_current_user", return_value={"id": "u5", "email": "eve@example.com"}):
+         patch("src.tools.indexing.get_current_user", return_value={"id": "u5", "email": "eve@example.com"}):
         result_a = json.loads(await index_project("/path/a", "repo-u5"))
 
     assert result_a["status"] == "queued"
@@ -366,7 +366,7 @@ async def test_rate_limit_is_per_user_not_global(db, redis_conn, monkeypatch):
     # User B should still be able to start their own job
     with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
          patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.server.get_current_user", return_value={"id": "u6", "email": "frank@example.com"}):
+         patch("src.tools.indexing.get_current_user", return_value={"id": "u6", "email": "frank@example.com"}):
         result_b = json.loads(await index_project("/path/b", "repo-u6"))
 
     assert result_b["status"] == "queued"  # NOT rate_limited

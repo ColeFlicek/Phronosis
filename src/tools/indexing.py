@@ -13,7 +13,7 @@ from ..jobs import run_index_project, run_enrich_summaries, run_reembed_project
 from ._shared import check_and_enqueue
 
 
-def register(mcp: FastMCP, get_services: Callable) -> None:
+def register(mcp: FastMCP, get_services: Callable) -> tuple:
 
     @mcp.tool()
     async def warmup_pattern_prototypes() -> str:
@@ -359,3 +359,5 @@ def register(mcp: FastMCP, get_services: Callable) -> None:
 
         result = await svcs.db.delete_project(fork_project_id)
         return json.dumps({"dropped": True, **result})
+
+    return index_project, index_changes, enrich_summaries
