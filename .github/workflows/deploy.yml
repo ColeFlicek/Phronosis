@@ -211,6 +211,9 @@ jobs:
           IMAGE="ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           sed -i "s|ghcr.io/${{ env.IMAGE_NAME }}:latest|${IMAGE}|g" \
             k8s/api-deployment.yaml k8s/worker-deployment.yaml
+          # Delete the service before re-applying so stale NodePort allocations
+          # don't block the apply (nodePort 30040 may be cached in cluster state)
+          kubectl delete service scopenos-api-svc -n scopenos --ignore-not-found=true
           kubectl apply -f k8s/api-deployment.yaml
           kubectl apply -f k8s/worker-deployment.yaml
 
