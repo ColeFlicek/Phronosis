@@ -81,6 +81,51 @@ def register(mcp: FastMCP, get_services: Callable) -> None:
         return json.dumps(result)
 
     @mcp.tool()
+    async def update_contract_structural(
+        contract_id: str,
+        structural_expression: dict,
+    ) -> str:
+        """
+        Replace the structural_expression on an existing contract in-place.
+
+        Use this when a contract's prohibited_patterns were generated as abstract
+        semantic descriptions instead of real Python identifier fragments. The
+        contract stays active — no re-approval needed.
+
+        structural_expression keys:
+          prohibited_patterns: bare function/method name fragments that are forbidden.
+            The rule engine does last-segment matching: "execute" matches any callee
+            named "execute", "execute_many", etc. Must be real identifiers that
+            appear in the call graph — NOT descriptions like "database_access".
+          required_callee: bare name that MUST be called alongside any prohibited one
+            (e.g. "require_user"), or null.
+          scope_exclusions: function ID prefixes exempt from this rule
+            (e.g. ["src.call_graph.storage", "api_signup", "api_health"]).
+          missing_metadata: [] unless this is a PRESENCE rule.
+
+        Example — fix the auth contract to use real asyncpg method names:
+          update_contract_structural(
+            contract_id="7a6f34cc-...",
+            structural_expression={
+              "prohibited_patterns": ["fetch", "fetchrow", "fetchval", "execute"],
+              "required_callee": "require_user",
+              "scope_exclusions": ["src.call_graph.storage", "api_signup", "api_health"],
+              "missing_metadata": []
+            }
+          )
+        """
+        svcs = await get_services()
+        user = get_current_user()
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        _contract = await svcs.db.get_contract(contract_id)
+        if _contract:
+            for _pid in (_contract.get("project_ids") or []):
+                await check_permission(user, _pid, "write", svcs.db)
+        result = await svcs.contracts.update_structural_expression(contract_id, structural_expression)
+        return json.dumps(result)
+
+    @mcp.tool()
     async def check_contracts(project_id: str, semantic: bool = False) -> str:
         """
         Run all active contracts against the current call graph for a project.
