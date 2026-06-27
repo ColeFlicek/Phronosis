@@ -86,7 +86,10 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         """
         svcs = await _tools_shared.get_services()
         pid = project_id or Path(path).name or "default"
-        await check_permission(get_current_user(), pid, "write", svcs.db)
+        user = get_current_user()
+        if user and not await svcs.db.has_any_owner(pid):
+            await svcs.db.grant_project_access(user["id"], pid, "owner")
+        await check_permission(user, pid, "write", svcs.db)
         user = get_current_user()
         user_id = user["id"] if user else "anon"
         try:
