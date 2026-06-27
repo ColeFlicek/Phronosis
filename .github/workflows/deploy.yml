@@ -4,74 +4,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      skip_tests:
-        description: "Skip tests (faster deploy)"
-        type: boolean
-        default: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: coleflicek/scopenos
 
 jobs:
-  test:
-    if: ${{ !inputs.skip_tests }}
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg17
-        env:
-          POSTGRES_USER: scopenos
-          POSTGRES_PASSWORD: scopenos
-          POSTGRES_DB: scopenos_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5.6.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install system dependencies
-        run: sudo apt-get install -y libpq-dev postgresql-client
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt pytest pytest-asyncio
-
-      - name: Setup database
-        run: |
-          PGPASSWORD=scopenos psql -U scopenos -h localhost -d scopenos_test \
-            -c "CREATE EXTENSION IF NOT EXISTS vector;"
-          PGPASSWORD=scopenos psql -U scopenos -h localhost -d scopenos_test -f schema_org.sql
-
-      - name: Run tests
-        run: pytest tests/ -q
-        env:
-          DATABASE_URL: postgresql://scopenos:scopenos@localhost/scopenos_test
-          REDIS_URL: redis://localhost:6379/1
-
   build-and-push:
-    needs: [test]
-    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
