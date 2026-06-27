@@ -30,7 +30,6 @@ from src.dependency_fingerprint import DependencyChecker
 
 
 @pytest.fixture(autouse=True)
-@pytest.fixture(autouse=True)
 def bypass_auth():
     """Bypass auth for all tool tests — set contextvar + stub check_project_access."""
     from src.auth import _current_user
