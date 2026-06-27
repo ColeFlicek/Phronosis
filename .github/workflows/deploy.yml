@@ -151,6 +151,18 @@ jobs:
       - name: Create namespace
         run: kubectl apply -f k8s/namespace.yaml
 
+      # ── Remove old namespaces from prior renames (phronosis, acip) ─────────
+      # NodePorts are cluster-wide; old services in renamed namespaces block
+      # re-allocation of the same port in the new scopenos namespace.
+      - name: Clean up legacy namespaces
+        run: |
+          for ns in phronosis acip; do
+            if kubectl get namespace $ns &>/dev/null; then
+              echo "Deleting legacy namespace: $ns"
+              kubectl delete namespace $ns --wait=false
+            fi
+          done
+
       # ── CoreDNS — patch to use reliable upstream ───────────────────────────
       - name: Patch CoreDNS upstream
         run: |
