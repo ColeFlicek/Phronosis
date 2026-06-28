@@ -23,32 +23,8 @@ from src.call_graph.storage import CallGraphDB
 
 _TEST_DSN = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL", "")
 
-# Tables in the public schema that need truncating between tests.
-# Order matters: FK children before parents.
-_TRUNCATE_TABLES = [
-    "contract_violations",
-    "contract_examples",
-    "contracts",
-    "project_access",
-    "api_keys",
-    "projects",
-    "decisions",
-    "decision_function_links",
-    "performance_concerns",
-    "solid_concerns",
-    "agent_improvements",
-    "users",
-    "pattern_prototypes",
-    "embedding_cache",
-    "dependency_fingerprints",
-    "project_snapshots",
-    "demo_projects",
-    "organizations",
-]
-
-
 async def _clean_db(pool) -> None:
-    """Drop all non-system schemas and truncate control-plane tables."""
+    """Drop all non-system schemas and truncate all public tables."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT schema_name FROM information_schema.schemata "
@@ -58,15 +34,13 @@ async def _clean_db(pool) -> None:
         for row in rows:
             await conn.execute(f'DROP SCHEMA IF EXISTS "{row["schema_name"]}" CASCADE')
 
-        # Only truncate tables that actually exist (schema may differ across versions)
-        existing = await conn.fetch(
-            "SELECT tablename FROM pg_tables "
-            "WHERE schemaname = 'public' AND tablename = ANY($1)",
-            _TRUNCATE_TABLES,
+        # Truncate every table in public — avoids maintaining a brittle list
+        tables = await conn.fetch(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
         )
-        if existing:
-            tables = ", ".join(row["tablename"] for row in existing)
-            await conn.execute(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
+        if tables:
+            names = ", ".join(row["tablename"] for row in tables)
+            await conn.execute(f"TRUNCATE {names} RESTART IDENTITY CASCADE")
 
 
 @pytest_asyncio.fixture
