@@ -25,7 +25,8 @@ def main() -> None:
     queues = [QUEUE_NAME]
     print(f"[worker] Starting RQ worker — queues: {queues}")
     print(f"[worker] Redis: {os.getenv('REDIS_URL', 'redis://localhost:6379')}")
-    print(f"[worker] Database: {os.getenv('DATABASE_URL', 'postgresql://scopenos:scopenos@localhost/scopenos')}")
+    control = os.getenv("CONTROL_DB_URL") or os.getenv("DATABASE_URL", "postgresql://scopenos:scopenos@localhost/scopenos")
+    print(f"[worker] Control DB: {control} (per-org DBs resolved from organizations table)")
     worker = Worker(queues, connection=redis)
     worker.work(with_scheduler=True)
 

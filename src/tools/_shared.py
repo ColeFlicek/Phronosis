@@ -84,7 +84,7 @@ async def contracts_for_name(db, function_name: str, project_id: str) -> list[di
     )
 
 
-def check_and_enqueue(user_id: str, fn, *args, job_timeout: int = 3600):
+def check_and_enqueue(user_id: str, fn, *args, job_timeout: int = 3600, **kwargs):
     import time
     from rq.job import Job, JobStatus
     from .. import queue as _queue_mod
@@ -113,7 +113,7 @@ def check_and_enqueue(user_id: str, fn, *args, job_timeout: int = 3600):
     if active_count >= _USER_QUEUE_DEPTH_LIMIT:
         raise RuntimeError("rate_limited")
 
-    job = q.enqueue(fn, *args, job_timeout=job_timeout)
+    job = q.enqueue(fn, *args, job_timeout=job_timeout, **kwargs)
     expire_at = now + job_timeout
     redis.zadd(depth_key, {job.id: expire_at})
     redis.expireat(depth_key, int(expire_at) + 60)

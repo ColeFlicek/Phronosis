@@ -268,7 +268,7 @@ class TestIndexerBranchWiring:
         return pipeline
 
     @pytest.mark.asyncio
-    async def test_index_changes_preserves_branch(self):
+    async def test_index_changes_preserves_branch(self, project_id: str):
         """index_changes must detect git context and pass branch to upsert_project."""
         from src.indexer import Indexer
         from src.call_graph.parser import FunctionNode
@@ -304,7 +304,7 @@ class TestIndexerBranchWiring:
         )
 
     @pytest.mark.asyncio
-    async def test_index_changes_calls_record_branch_changes(self):
+    async def test_index_changes_calls_record_branch_changes(self, project_id: str):
         """index_changes must populate branch_function_changes for changed functions."""
         from src.indexer import Indexer
         from src.call_graph.parser import FunctionNode
@@ -335,7 +335,7 @@ class TestIndexerBranchWiring:
         assert "proj.mod.my_func" in call_args[2]  # function_ids
 
     @pytest.mark.asyncio
-    async def test_index_changes_no_record_when_nothing_changed(self):
+    async def test_index_changes_no_record_when_nothing_changed(self, project_id: str):
         """record_branch_changes must not be called when no functions changed."""
         from src.indexer import Indexer
 
