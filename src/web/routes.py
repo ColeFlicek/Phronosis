@@ -285,50 +285,5 @@ def register_routes(
 
     @mcp.custom_route("/api/health", methods=["GET"])
     async def api_health(request: Request) -> JSONResponse:
-        """Return a lightweight health check result for all three Scopenos layers."""
-        result: dict = {}
-
-        async def _check() -> None:
-            svcs = await get_services()
-            db = svcs.db
-            embeddings = svcs.embeddings
-
-            try:
-                n = await db.count_nodes()
-                result["call_graph"] = {"status": "ok", "node_count": n}
-            except Exception as e:
-                result["call_graph"] = {"status": "error", "error": str(e)}
-
-            try:
-                n = await embeddings.count_embeddings()
-                d = await db.count_decision_embeddings()
-                result["embeddings"] = {
-                    "status": "ok",
-                    "function_vectors": n,
-                    "decision_vectors": d,
-                }
-            except Exception as e:
-                result["embeddings"] = {"status": "error", "error": str(e)}
-
-            try:
-                d = await db.count_decisions()
-                result["decision_memory"] = {"status": "ok", "decision_count": d}
-            except Exception as e:
-                result["decision_memory"] = {"status": "error", "error": str(e)}
-
-            result["embedding_config"] = {
-                "provider": embeddings._provider,
-                "model": embeddings._model,
-                "dimensions": embeddings._dim,
-                "storage": "pgvector",
-            }
-
-        try:
-            await asyncio.wait_for(_check(), timeout=5.0)
-        except asyncio.TimeoutError:
-            result["server"] = {"status": "error", "error": "health check timed out (DB unreachable?)"}
-        except Exception as exc:
-            result["server"] = {"status": "error", "error": str(exc)}
-
-        status_code = 200 if "server" not in result else 503
-        return JSONResponse(result, status_code=status_code)
+        """Liveness/readiness probe — returns 200 if the HTTP server is up."""
+        return JSONResponse({"status": "ok"})
