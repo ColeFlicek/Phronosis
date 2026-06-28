@@ -1,12 +1,93 @@
 """
 Shared fixtures for Scopenos tests.
 
-GraphData and node construction helpers so individual test files
-don't repeat boilerplate. Tests that need a GraphData call _graph();
-tests that need a node dict call _node().
-"""
-from src.call_graph.models import GraphData
+Two types of fixtures live here:
 
+  db          — real CallGraphDB against the CI test database (TEST_DATABASE_URL).
+                Truncates all data before each test so tests are fully isolated.
+                Never touches DATABASE_URL (production) or BENCHMARK_DATABASE_URL.
+
+  project_id  — stable, unique project ID for the current test, derived from the
+                test class and method name. Prevents tests from sharing project
+                namespaces even within the same run.
+
+In-memory helpers:
+
+  _node / _graph — build model objects without a DB connection.
+"""
+from __future__ import annotations
+
+import os
+import re
+
+import pytest
+import pytest_asyncio
+
+from src.call_graph.models import GraphData
+from src.call_graph.storage import CallGraphDB
+
+# ── Test database fixture ─────────────────────────────────────────────────────
+
+_TEST_DSN = os.getenv("TEST_DATABASE_URL", "")
+
+
+async def _wipe(pool) -> None:
+    """Drop all project schemas and truncate every public table."""
+    async with pool.acquire() as conn:
+        schemas = await conn.fetch(
+            "SELECT schema_name FROM information_schema.schemata "
+            "WHERE schema_name NOT IN "
+            "  ('public','pg_catalog','information_schema','pg_toast') "
+            "AND schema_name NOT LIKE 'pg_%'"
+        )
+        for row in schemas:
+            await conn.execute(
+                f'DROP SCHEMA IF EXISTS "{row["schema_name"]}" CASCADE'
+            )
+
+        tables = await conn.fetch(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        )
+        if tables:
+            names = ", ".join(row["tablename"] for row in tables)
+            await conn.execute(f"TRUNCATE {names} RESTART IDENTITY CASCADE")
+
+
+@pytest_asyncio.fixture
+async def db():
+    """Real CallGraphDB connected to TEST_DATABASE_URL.
+
+    Wipes the database before each test — project schemas dropped, all public
+    tables truncated. Skips if TEST_DATABASE_URL is not set.
+
+    Never uses DATABASE_URL (the server's production connection string) or
+    BENCHMARK_DATABASE_URL (the persistent benchmark index).
+    """
+    if not _TEST_DSN:
+        pytest.skip("TEST_DATABASE_URL not set")
+
+    instance = await CallGraphDB.create(_TEST_DSN)
+    await _wipe(instance._pool)
+    yield instance
+    await instance.close()
+
+
+@pytest.fixture
+def project_id(request) -> str:
+    """Stable, unique project ID for the current test.
+
+    Derived from the test class and method name so it is human-readable,
+    does not collide with any other test, and is identical on every run
+    (so logs and DB rows are traceable back to a specific test).
+    """
+    cls = request.node.cls.__name__ if request.node.cls else ""
+    name = request.node.name
+    raw = f"{cls}_{name}" if cls else name
+    slug = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    return f"t_{slug}"[:60]
+
+
+# ── In-memory helpers ─────────────────────────────────────────────────────────
 
 def _node(
     node_id: str,

@@ -96,7 +96,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         await check_permission(user, pid, "write", svcs.db)
         user_id = user["id"] if user else "anon"
         try:
-            job = check_and_enqueue(user_id, run_index_project, path, pid, job_timeout=3600)
+            job = check_and_enqueue(user_id, run_index_project, path, pid, job_timeout=3600, db_url=svcs.db._dsn)
         except RuntimeError:
             return json.dumps({"status": "rate_limited"})
         import os
@@ -213,7 +213,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         user = get_current_user()
         user_id = user["id"] if user else "anon"
         try:
-            job = check_and_enqueue(user_id, run_reembed_project, project_id, job_timeout=3600)
+            job = check_and_enqueue(user_id, run_reembed_project, project_id, job_timeout=3600, db_url=svcs.db._dsn)
         except RuntimeError:
             return json.dumps({"status": "rate_limited"})
         return json.dumps({"job_id": job.id, "status": "queued"})
@@ -245,7 +245,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         user = get_current_user()
         user_id = user["id"] if user else "anon"
         try:
-            job = check_and_enqueue(user_id, run_enrich_summaries, project_id, limit, force, job_timeout=7200)
+            job = check_and_enqueue(user_id, run_enrich_summaries, project_id, limit, force, job_timeout=7200, db_url=svcs.db._dsn)
         except RuntimeError:
             return json.dumps({"status": "rate_limited"})
         return json.dumps({"job_id": job.id, "status": "queued"})

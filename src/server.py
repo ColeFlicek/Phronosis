@@ -602,7 +602,7 @@ async def http_enrich_summaries(request: Request) -> JSONResponse:
         await check_permission(user, project_id, "write", svcs.db)
         user_id = user["id"]
         try:
-            job = _check_and_enqueue(user_id, run_enrich_summaries, project_id, limit, force, job_timeout=7200)
+            job = _check_and_enqueue(user_id, run_enrich_summaries, project_id, limit, force, job_timeout=7200, db_url=svcs.db._dsn)
         except RuntimeError:
             return JSONResponse({"status": "rate_limited"}, status_code=429)
         return JSONResponse({"job_id": job.id, "status": "queued", "project_id": project_id})

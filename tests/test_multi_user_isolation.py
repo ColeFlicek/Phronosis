@@ -39,32 +39,32 @@ class TestSchemaIsolation:
     """Two users, two projects: data must not bleed across schemas."""
 
     @pytest.mark.asyncio
-    async def test_separate_project_ids_get_separate_schemas(self, db):
+    async def test_separate_project_ids_get_separate_schemas(self, db, project_id: str):
         """user_a and user_b both name their project 'myapp' but get distinct schemas."""
-        await db.upsert_project("user_a_myapp", "myapp", "/a")
-        await db.upsert_project("user_b_myapp", "myapp", "/b")
+        await db.upsert_project(f"{project_id}ua", project_id, "/a")
+        await db.upsert_project(f"{project_id}ub", project_id, "/b")
 
-        schema_a = await db.get_schema_name_for_project("user_a_myapp")
-        schema_b = await db.get_schema_name_for_project("user_b_myapp")
+        schema_a = await db.get_schema_name_for_project(f"{project_id}ua")
+        schema_b = await db.get_schema_name_for_project(f"{project_id}ub")
         assert schema_a != schema_b
 
     @pytest.mark.asyncio
-    async def test_nodes_written_to_correct_schema(self, db):
+    async def test_nodes_written_to_correct_schema(self, db, project_id: str):
         """Nodes written for user_a's project do not appear in user_b's project."""
-        await db.upsert_project("ua_proj", "proj", "/a")
-        await db.upsert_project("ub_proj", "proj", "/b")
+        await db.upsert_project(f"{project_id}ua", "proj", "/a")
+        await db.upsert_project(f"{project_id}ub", "proj", "/b")
 
-        pdb_a = await db.project_db(await db.get_schema_name_for_project("ua_proj"))
-        pdb_b = await db.project_db(await db.get_schema_name_for_project("ub_proj"))
+        pdb_a = await db.project_db(await db.get_schema_name_for_project(f"{project_id}ua"))
+        pdb_b = await db.project_db(await db.get_schema_name_for_project(f"{project_id}ub"))
 
         node_a = _make_node("mod.fn_a", "fn_a")
         node_b = _make_node("mod.fn_b", "fn_b")
 
-        await pdb_a.upsert_nodes([node_a], "ua_proj")
-        await pdb_b.upsert_nodes([node_b], "ub_proj")
+        await pdb_a.upsert_nodes([node_a], f"{project_id}ua")
+        await pdb_b.upsert_nodes([node_b], f"{project_id}ub")
 
-        nodes_a = await pdb_a.get_all_nodes("ua_proj")
-        nodes_b = await pdb_b.get_all_nodes("ub_proj")
+        nodes_a = await pdb_a.get_all_nodes(f"{project_id}ua")
+        nodes_b = await pdb_b.get_all_nodes(f"{project_id}ub")
 
         a_names = {n["name"] for n in nodes_a}
         b_names = {n["name"] for n in nodes_b}
@@ -75,7 +75,7 @@ class TestSchemaIsolation:
         assert "fn_a" not in b_names
 
     @pytest.mark.asyncio
-    async def test_access_control_prevents_cross_user_reads(self, db):
+    async def test_access_control_prevents_cross_user_reads(self, db, project_id: str):
         """check_project_access returns False for a user who doesn't own the project."""
         # Create users first (project_access FK → users)
         alice = await db.create_user("alice@example.com")
@@ -92,7 +92,7 @@ class TestSchemaIsolation:
         assert alice_access
 
     @pytest.mark.asyncio
-    async def test_accessible_projects_scoped_per_user(self, db):
+    async def test_accessible_projects_scoped_per_user(self, db, project_id: str):
         """list_user_projects returns only projects the requesting user owns."""
         from datetime import datetime, timezone
         alice = await db.create_user("alice@example.com")
@@ -144,7 +144,7 @@ class TestSchemaIsolation:
         assert "alice_proj_1" not in bob_ids
 
     @pytest.mark.asyncio
-    async def test_global_tables_shared_not_duplicated(self, db):
+    async def test_global_tables_shared_not_duplicated(self, db, project_id: str):
         """embedding_cache and pattern_prototypes live in public schema — shared across all users."""
         await db.upsert_project("ua_global", "p", "/a")
         await db.upsert_project("ub_global", "p", "/b")
@@ -183,7 +183,7 @@ class TestForkIsolation:
     """Fork isolation: user_a's fork is invisible to user_b."""
 
     @pytest.mark.asyncio
-    async def test_fork_not_visible_to_other_user(self, db):
+    async def test_fork_not_visible_to_other_user(self, db, project_id: str):
         """After user_a creates a fork, user_b's accessible projects don't include it."""
         from datetime import datetime, timezone
         alice = await db.create_user("alice@example.com")
@@ -221,7 +221,7 @@ class TestForkIsolation:
         assert "alice_base" not in bob_ids
 
     @pytest.mark.asyncio
-    async def test_drop_fork_leaves_parent_untouched(self, db):
+    async def test_drop_fork_leaves_parent_untouched(self, db, project_id: str):
         """Dropping a fork schema must not affect the parent schema's nodes."""
         await db.upsert_project("parent_proj", "parent", "/parent")
         schema_p = await db.get_schema_name_for_project("parent_proj")

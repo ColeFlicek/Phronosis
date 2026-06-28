@@ -57,7 +57,7 @@ async def _wire_auth(db):
 # ── rename_project (storage) ───────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_rename_project_returns_true_and_updates_name(db):
+async def test_rename_project_returns_true_and_updates_name(db, project_id: str):
     await db.upsert_project("myapp", "myapp", "/tmp/myapp")
 
     result = await db.rename_project("myapp", "My Application")
@@ -69,7 +69,7 @@ async def test_rename_project_returns_true_and_updates_name(db):
 
 
 @pytest.mark.asyncio
-async def test_rename_project_returns_false_for_unknown_id(db):
+async def test_rename_project_returns_false_for_unknown_id(db, project_id: str):
     result = await db.rename_project("does-not-exist", "Anything")
     assert result is False
 
@@ -77,7 +77,7 @@ async def test_rename_project_returns_false_for_unknown_id(db):
 # ── list_user_projects (storage) ───────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_list_user_projects_includes_owned_project(db):
+async def test_list_user_projects_includes_owned_project(db, project_id: str):
     user = await db.create_user("alice@example.com")
     await db.upsert_project("proj1", "Project One", "/tmp/proj1")
     await db._db.execute(
@@ -92,7 +92,7 @@ async def test_list_user_projects_includes_owned_project(db):
 
 
 @pytest.mark.asyncio
-async def test_list_user_projects_includes_demo_projects(db):
+async def test_list_user_projects_includes_demo_projects(db, project_id: str):
     user = await db.create_user("bob@example.com")
     now = datetime.now(timezone.utc).isoformat()
     await db.upsert_project("demo-repo", "Demo Repo", "")
@@ -108,7 +108,7 @@ async def test_list_user_projects_includes_demo_projects(db):
 
 
 @pytest.mark.asyncio
-async def test_list_user_projects_demo_role_is_viewer(db):
+async def test_list_user_projects_demo_role_is_viewer(db, project_id: str):
     user = await db.create_user("carol@example.com")
     now = datetime.now(timezone.utc).isoformat()
     await db.upsert_project("demo2", "Demo 2", "")
@@ -127,21 +127,21 @@ async def test_list_user_projects_demo_role_is_viewer(db):
 # ── GET /api/me ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_me_without_key_returns_401(db):
+async def test_me_without_key_returns_401(db, project_id: str):
     app = make_app(db)
     resp = await _get(app, "/api/me")
     assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_me_with_invalid_key_returns_401(db):
+async def test_me_with_invalid_key_returns_401(db, project_id: str):
     app = make_app(db)
     resp = await _get(app, "/api/me", headers={"X-API-Key": "not-a-real-key"})
     assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_me_with_valid_key_returns_user_and_projects(db):
+async def test_me_with_valid_key_returns_user_and_projects(db, project_id: str):
     user = await db.create_user("dave@example.com")
     raw_key = await db.create_api_key(user["id"])
     app = make_app(db)
@@ -155,7 +155,7 @@ async def test_me_with_valid_key_returns_user_and_projects(db):
 
 
 @pytest.mark.asyncio
-async def test_me_projects_list_includes_owned_project(db):
+async def test_me_projects_list_includes_owned_project(db, project_id: str):
     user = await db.create_user("eve@example.com")
     raw_key = await db.create_api_key(user["id"])
     await db.upsert_project("eve-proj", "Eve Project", "/tmp/eve")
@@ -175,7 +175,7 @@ async def test_me_projects_list_includes_owned_project(db):
 # ── PATCH /api/projects/{project_id} ──────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_rename_endpoint_missing_name_returns_400(db):
+async def test_rename_endpoint_missing_name_returns_400(db, project_id: str):
     await db.upsert_project("app1", "App One", "/tmp/app1")
     app = make_app(db)
     resp = await _patch(app, "/api/projects/app1", json={})
@@ -183,14 +183,14 @@ async def test_rename_endpoint_missing_name_returns_400(db):
 
 
 @pytest.mark.asyncio
-async def test_rename_endpoint_unknown_project_returns_404(db):
+async def test_rename_endpoint_unknown_project_returns_404(db, project_id: str):
     app = make_app(db)
     resp = await _patch(app, "/api/projects/ghost", json={"name": "Ghost"})
     assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_rename_endpoint_updates_name_and_returns_200(db):
+async def test_rename_endpoint_updates_name_and_returns_200(db, project_id: str):
     await db.upsert_project("app2", "App Two", "/tmp/app2")
     app = make_app(db)
 
