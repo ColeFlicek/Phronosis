@@ -67,7 +67,7 @@ class TestMigrateToSchemas:
     """Integration tests for the migrate_to_schemas migration script."""
 
     @pytest.mark.asyncio
-    async def test_dry_run_does_not_create_schemas(self, db):
+    async def test_dry_run_does_not_create_schemas(self, db, project_id: str):
         """Dry run must not create any project schemas."""
         # Insert two projects (upsert_project creates their schemas)
         await db.upsert_project("proj_a", "Project A", "/tmp/a")
@@ -111,7 +111,7 @@ class TestMigrateToSchemas:
         )
 
     @pytest.mark.asyncio
-    async def test_migrate_moves_nodes_to_project_schema(self, db):
+    async def test_migrate_moves_nodes_to_project_schema(self, db, project_id: str):
         """Execute migration copies nodes from public.nodes to the project schema."""
         project_id = "mig_core_test"
         schema = derive_schema_name(project_id)
@@ -153,7 +153,7 @@ class TestMigrateToSchemas:
         )
 
     @pytest.mark.asyncio
-    async def test_migrate_skips_tables_without_project_id(self, db):
+    async def test_migrate_skips_tables_without_project_id(self, db, project_id: str):
         """Migration completes cleanly even if some per-project tables lack rows."""
         project_id = "mig_skip_test"
 
@@ -164,7 +164,7 @@ class TestMigrateToSchemas:
         await migrate(_TEST_DB_URL, dry_run=False)
 
     @pytest.mark.asyncio
-    async def test_per_project_tables_constant_matches_schema(self, db):
+    async def test_per_project_tables_constant_matches_schema(self, db, project_id: str):
         """Every table in PER_PROJECT_TABLES should exist in the public schema."""
         async with db._pool.acquire() as conn:
             existing = {
@@ -183,17 +183,17 @@ class TestMigrateToSchemas:
         )
 
     @pytest.mark.asyncio
-    async def test_dry_run_with_no_projects(self, db):
+    async def test_dry_run_with_no_projects(self, db, project_id: str):
         """Dry run on an empty projects table completes without error."""
         await migrate(_TEST_DB_URL, dry_run=True)  # must not raise
 
     @pytest.mark.asyncio
-    async def test_execute_with_no_projects(self, db):
+    async def test_execute_with_no_projects(self, db, project_id: str):
         """Execute migration with no projects completes cleanly."""
         await migrate(_TEST_DB_URL, dry_run=False)  # must not raise
 
     @pytest.mark.asyncio
-    async def test_migrate_is_idempotent(self, db):
+    async def test_migrate_is_idempotent(self, db, project_id: str):
         """Running migration twice should not fail or duplicate data."""
         project_id = "mig_idem_test"
         schema = derive_schema_name(project_id)
@@ -226,7 +226,7 @@ class TestMigrateToSchemas:
         )
 
     @pytest.mark.asyncio
-    async def test_migrate_multiple_projects(self, db):
+    async def test_migrate_multiple_projects(self, db, project_id: str):
         """Migration handles multiple projects independently."""
         projects = ["mig_multi_a", "mig_multi_b", "mig_multi_c"]
 

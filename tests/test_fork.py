@@ -144,7 +144,7 @@ def test_parse_functions_at_commit_missing_file(tmp_path: Path):
 # ── get_function_content_hashes ───────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_get_function_content_hashes(db: CallGraphDB):
+async def test_get_function_content_hashes(db: CallGraphDB, project_id: str):
     """Returns {id: body_hash} for nodes in the given files."""
     schema = "fork_hash_test"
     async with db._pool.acquire() as conn:
@@ -309,7 +309,7 @@ async def test_create_fork_no_changes(db: CallGraphDB, tmp_path: Path):
 # ── drop_fork (via MCP tool logic) ───────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_drop_fork_refuses_non_fork(db: CallGraphDB):
+async def test_drop_fork_refuses_non_fork(db: CallGraphDB, project_id: str):
     """drop_fork should refuse to delete a project that is not a fork."""
     from datetime import datetime, timezone
 
@@ -335,7 +335,7 @@ async def test_drop_fork_refuses_non_fork(db: CallGraphDB):
 
 
 @pytest.mark.asyncio
-async def test_drop_fork_deletes_fork(db: CallGraphDB):
+async def test_drop_fork_deletes_fork(db: CallGraphDB, project_id: str):
     """drop_fork deletes a fork project including its schema."""
     from datetime import datetime, timezone
 

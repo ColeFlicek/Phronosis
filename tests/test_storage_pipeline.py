@@ -33,14 +33,14 @@ def _make_node(node_id: str, file: str = "/project/mod.py") -> FunctionNode:
 # ── get_project_root ──────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_get_project_root_returns_root_after_upsert(db):
-    await db.upsert_project("myapp", "My App", root="/workspace/myapp")
-    root = await db.get_project_root("myapp")
+async def test_get_project_root_returns_root_after_upsert(db, project_id: str):
+    await db.upsert_project(project_id, "My App", root="/workspace/myapp")
+    root = await db.get_project_root(project_id)
     assert root == "/workspace/myapp"
 
 
 @pytest.mark.asyncio
-async def test_get_project_root_returns_empty_for_unknown_project(db):
+async def test_get_project_root_returns_empty_for_unknown_project(db, project_id: str):
     root = await db.get_project_root("does-not-exist")
     assert root == ""
 
@@ -48,11 +48,11 @@ async def test_get_project_root_returns_empty_for_unknown_project(db):
 # ── get_all_nodes ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_get_all_nodes_returns_dicts_with_required_keys(db):
-    await db.upsert_project("proj", "Proj", root="/src")
-    await db.upsert_nodes([_make_node("mod.hello")], project_id="proj")
+async def test_get_all_nodes_returns_dicts_with_required_keys(db, project_id: str):
+    await db.upsert_project(project_id, "Proj", root="/src")
+    await db.upsert_nodes([_make_node("mod.hello")], project_id=project_id)
 
-    nodes = await db.get_all_nodes("proj")
+    nodes = await db.get_all_nodes(project_id)
 
     assert len(nodes) == 1
     node = nodes[0]
@@ -61,11 +61,11 @@ async def test_get_all_nodes_returns_dicts_with_required_keys(db):
 
 
 @pytest.mark.asyncio
-async def test_get_all_nodes_returns_correct_values(db):
-    await db.upsert_project("proj", "Proj", root="/src")
-    await db.upsert_nodes([_make_node("mod.hello", file="/src/mod.py")], project_id="proj")
+async def test_get_all_nodes_returns_correct_values(db, project_id: str):
+    await db.upsert_project(project_id, "Proj", root="/src")
+    await db.upsert_nodes([_make_node("mod.hello", file="/src/mod.py")], project_id=project_id)
 
-    nodes = await db.get_all_nodes("proj")
+    nodes = await db.get_all_nodes(project_id)
 
     assert nodes[0]["id"] == "mod.hello"
     assert nodes[0]["name"] == "hello"
@@ -73,19 +73,19 @@ async def test_get_all_nodes_returns_correct_values(db):
 
 
 @pytest.mark.asyncio
-async def test_get_all_nodes_empty_for_unknown_project(db):
+async def test_get_all_nodes_empty_for_unknown_project(db, project_id: str):
     nodes = await db.get_all_nodes("no-such-project")
     assert nodes == []
 
 
 @pytest.mark.asyncio
-async def test_get_all_nodes_scoped_to_project(db):
-    await db.upsert_project("proj-a", "A", root="/a")
-    await db.upsert_project("proj-b", "B", root="/b")
-    await db.upsert_nodes([_make_node("mod.fn_a")], project_id="proj-a")
-    await db.upsert_nodes([_make_node("mod.fn_b")], project_id="proj-b")
+async def test_get_all_nodes_scoped_to_project(db, project_id: str):
+    await db.upsert_project(f"{project_id}a", "A", root="/a")
+    await db.upsert_project(f"{project_id}b", "B", root="/b")
+    await db.upsert_nodes([_make_node("mod.fn_a")], project_id=f"{project_id}a")
+    await db.upsert_nodes([_make_node("mod.fn_b")], project_id=f"{project_id}b")
 
-    nodes_a = await db.get_all_nodes("proj-a")
+    nodes_a = await db.get_all_nodes(f"{project_id}a")
     assert len(nodes_a) == 1
     assert nodes_a[0]["id"] == "mod.fn_a"
 
@@ -93,11 +93,11 @@ async def test_get_all_nodes_scoped_to_project(db):
 # ── get_node ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_get_node_returns_dict_with_required_keys(db):
-    await db.upsert_project("proj", "Proj", root="/src")
-    await db.upsert_nodes([_make_node("mod.hello")], project_id="proj")
+async def test_get_node_returns_dict_with_required_keys(db, project_id: str):
+    await db.upsert_project(project_id, "Proj", root="/src")
+    await db.upsert_nodes([_make_node("mod.hello")], project_id=project_id)
 
-    node = await db.get_node("mod.hello", project_id="proj")
+    node = await db.get_node("mod.hello", project_id=project_id)
 
     assert node is not None
     for key in ("id", "name", "file", "module", "type", "signature"):
@@ -105,7 +105,7 @@ async def test_get_node_returns_dict_with_required_keys(db):
 
 
 @pytest.mark.asyncio
-async def test_get_node_returns_none_for_missing(db):
+async def test_get_node_returns_none_for_missing(db, project_id: str):
     node = await db.get_node("does.not.exist")
     assert node is None
 
@@ -113,14 +113,14 @@ async def test_get_node_returns_none_for_missing(db):
 # ── get_nodes_by_file ─────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_get_nodes_by_file_returns_only_matching_file(db):
-    await db.upsert_project("proj", "Proj", root="/src")
+async def test_get_nodes_by_file_returns_only_matching_file(db, project_id: str):
+    await db.upsert_project(project_id, "Proj", root="/src")
     await db.upsert_nodes([
         _make_node("mod.fn_a", file="/src/mod.py"),
         _make_node("other.fn_b", file="/src/other.py"),
-    ], project_id="proj")
+    ], project_id=project_id)
 
-    nodes = await db.get_nodes_by_file("/src/mod.py", project_id="proj")
+    nodes = await db.get_nodes_by_file("/src/mod.py", project_id=project_id)
 
     assert len(nodes) == 1
     assert nodes[0]["id"] == "mod.fn_a"

@@ -26,7 +26,7 @@ from src.call_graph.storage import CallGraphDB
 # ── create_user ───────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_create_user_returns_user_with_email(db):
+async def test_create_user_returns_user_with_email(db, project_id: str):
     user = await db.create_user("alice@example.com")
     assert user["email"] == "alice@example.com"
     assert user["plan"] == "free"
@@ -34,7 +34,7 @@ async def test_create_user_returns_user_with_email(db):
 
 
 @pytest.mark.asyncio
-async def test_create_user_duplicate_email_raises(db):
+async def test_create_user_duplicate_email_raises(db, project_id: str):
     await db.create_user("alice@example.com")
     with pytest.raises(Exception):
         await db.create_user("alice@example.com")
@@ -43,7 +43,7 @@ async def test_create_user_duplicate_email_raises(db):
 # ── create_api_key + get_user_by_key ─────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_get_user_by_valid_key_returns_user(db):
+async def test_get_user_by_valid_key_returns_user(db, project_id: str):
     user = await db.create_user("alice@example.com")
     raw_key = await db.create_api_key(user["id"], name="test key")
     found = await db.get_user_by_key(raw_key)
@@ -52,13 +52,13 @@ async def test_get_user_by_valid_key_returns_user(db):
 
 
 @pytest.mark.asyncio
-async def test_get_user_by_invalid_key_returns_none(db):
+async def test_get_user_by_invalid_key_returns_none(db, project_id: str):
     result = await db.get_user_by_key("not-a-real-key")
     assert result is None
 
 
 @pytest.mark.asyncio
-async def test_get_user_by_revoked_key_returns_none(db):
+async def test_get_user_by_revoked_key_returns_none(db, project_id: str):
     user = await db.create_user("revoked@example.com")
     raw_key = await db.create_api_key(user["id"], name="revoked key")
     import hashlib
@@ -72,7 +72,7 @@ async def test_get_user_by_revoked_key_returns_none(db):
 
 
 @pytest.mark.asyncio
-async def test_get_user_by_key_updates_last_used(db):
+async def test_get_user_by_key_updates_last_used(db, project_id: str):
     user = await db.create_user("bob@example.com")
     raw_key = await db.create_api_key(user["id"])
     await db.get_user_by_key(raw_key)
@@ -148,7 +148,7 @@ from src.auth import check_permission
 
 
 @pytest.mark.asyncio
-async def test_unauthenticated_raises_401(db):
+async def test_unauthenticated_raises_401(db, project_id: str):
     with pytest.raises(HTTPException) as exc:
         await check_permission(None, "any-project", "read", db)
     assert exc.value.status_code == 401
@@ -209,7 +209,7 @@ def make_test_app(db):
 
 
 @pytest.mark.asyncio
-async def test_middleware_sets_user_for_valid_key(db):
+async def test_middleware_sets_user_for_valid_key(db, project_id: str):
     user = await db.create_user("alice@example.com")
     raw_key = await db.create_api_key(user["id"])
     app = make_test_app(db)
@@ -220,7 +220,7 @@ async def test_middleware_sets_user_for_valid_key(db):
 
 
 @pytest.mark.asyncio
-async def test_middleware_sets_none_for_missing_key(db):
+async def test_middleware_sets_none_for_missing_key(db, project_id: str):
     app = make_test_app(db)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/whoami")
@@ -229,7 +229,7 @@ async def test_middleware_sets_none_for_missing_key(db):
 
 
 @pytest.mark.asyncio
-async def test_middleware_sets_none_for_invalid_key(db):
+async def test_middleware_sets_none_for_invalid_key(db, project_id: str):
     app = make_test_app(db)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/whoami", headers={"X-API-Key": "bogus-key"})

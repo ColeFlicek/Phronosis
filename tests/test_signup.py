@@ -48,7 +48,7 @@ async def _post(app, path, json):
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_signup_creates_user_and_sends_key(db):
+async def test_signup_creates_user_and_sends_key(db, project_id: str):
     sent = []
 
     async def capture_email(to, api_key):
@@ -65,7 +65,7 @@ async def test_signup_creates_user_and_sends_key(db):
 
 
 @pytest.mark.asyncio
-async def test_signup_user_persisted_in_db(db):
+async def test_signup_user_persisted_in_db(db, project_id: str):
     async def noop_email(to, api_key):
         pass
 
@@ -78,7 +78,7 @@ async def test_signup_user_persisted_in_db(db):
 
 
 @pytest.mark.asyncio
-async def test_signup_missing_email_returns_400(db):
+async def test_signup_missing_email_returns_400(db, project_id: str):
     async def noop_email(to, api_key):
         pass
 
@@ -88,7 +88,7 @@ async def test_signup_missing_email_returns_400(db):
 
 
 @pytest.mark.asyncio
-async def test_signup_existing_user_issues_new_key(db):
+async def test_signup_existing_user_issues_new_key(db, project_id: str):
     sent = []
 
     async def capture_email(to, api_key):

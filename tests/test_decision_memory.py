@@ -133,7 +133,7 @@ class TestLogDecision:
         assert "Monolith" in reasoning
 
     @pytest.mark.asyncio
-    async def test_logged_decision_visible_in_history(self, memory: DecisionMemory, db: CallGraphDB):
+    async def test_logged_decision_visible_in_history(self, memory: DecisionMemory, db: CallGraphDB, project_id: str):
         await db.upsert_project("proj", "proj", "/project")
         await db.upsert_nodes([_node("src.cache.get")], "proj")
         await memory.log_decision(
@@ -148,7 +148,7 @@ class TestLogDecision:
         assert "Added caching layer" in descriptions
 
     @pytest.mark.asyncio
-    async def test_multiple_decisions_all_linked(self, memory: DecisionMemory, db: CallGraphDB):
+    async def test_multiple_decisions_all_linked(self, memory: DecisionMemory, db: CallGraphDB, project_id: str):
         await db.upsert_project("proj", "proj", "/project")
         await db.upsert_nodes([_node("src.mod.fn")], "proj")
         for desc in ["First decision", "Second decision"]:
@@ -171,7 +171,7 @@ class TestGetDecisionHistory:
         assert history == []
 
     @pytest.mark.asyncio
-    async def test_scoped_to_project(self, memory: DecisionMemory, db: CallGraphDB):
+    async def test_scoped_to_project(self, memory: DecisionMemory, db: CallGraphDB, project_id: str):
         """Decisions logged for proj_a must not appear when querying proj_b."""
         await db.upsert_project("proj_a", "proj_a", "/project")
         await db.upsert_project("proj_b", "proj_b", "/project")
@@ -186,7 +186,7 @@ class TestGetDecisionHistory:
         assert history == []
 
     @pytest.mark.asyncio
-    async def test_history_includes_type_and_description(self, memory: DecisionMemory, db: CallGraphDB):
+    async def test_history_includes_type_and_description(self, memory: DecisionMemory, db: CallGraphDB, project_id: str):
         await db.upsert_project("proj", "proj", "/project")
         await db.upsert_nodes([_node("src.cmd.handle")], "proj")
         await memory.log_decision(
