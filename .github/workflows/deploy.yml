@@ -170,8 +170,8 @@ jobs:
       # ── Wait for rollout — dump logs on failure so you can see WHY ─────────
       - name: Wait for rollout
         run: |
-          kubectl rollout status deployment/scopenos-api -n scopenos --timeout=5m
-          kubectl rollout status deployment/scopenos-worker -n scopenos --timeout=5m
+          kubectl rollout status deployment/scopenos-api -n scopenos --timeout=10m
+          kubectl rollout status deployment/scopenos-worker -n scopenos --timeout=10m
 
       # ── Smoke test — verify the live pod actually responds ─────────────────
       # Tailscale is already connected above. Hit /api/health through the
