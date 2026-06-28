@@ -229,6 +229,29 @@ class CallGraphDB:
         if self._db:
             await self._db.close()
 
+    async def delete_where(self, table: str, condition: str, params: tuple = ()) -> None:
+        """Delete rows from table matching condition.
+
+        Raises ValueError if condition is empty — prevents accidental full-table wipes.
+        For schema-qualified tables, include the schema in the table name: '"schema".table'.
+        """
+        if not condition or not condition.strip():
+            raise ValueError(f"delete_where: condition must be non-empty for table '{table}'")
+        await self._db.execute(f"DELETE FROM {table} WHERE {condition}", params)
+
+    async def update_where(
+        self, table: str, set_clause: str, condition: str, params: tuple = ()
+    ) -> str:
+        """Update rows in table matching condition. Returns asyncpg status string ('UPDATE N').
+
+        Raises ValueError if condition is empty — prevents accidental full-table updates.
+        """
+        if not condition or not condition.strip():
+            raise ValueError(f"update_where: condition must be non-empty for table '{table}'")
+        return await self._db.execute(
+            f"UPDATE {table} SET {set_clause} WHERE {condition}", params
+        )
+
     async def project_db(self, schema_name: str) -> "CallGraphDB":
         """Return a project-scoped CallGraphDB whose pool has search_path set to schema_name.
 
@@ -564,7 +587,7 @@ class CallGraphDB:
         if schema_name:
             await self._db.execute("SELECT drop_project_schema(?)", (schema_name,))
         else:
-            await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            await self.delete_where("projects", "id = $1", (project_id,))
         await self._db.commit()
         return {"project_id": project_id, "nodes_deleted": node_count, "edges_deleted": edge_count}
 
@@ -1096,12 +1119,8 @@ class CallGraphDB:
 
     async def delete_file_data(self, file_path: str, project_id: str) -> None:
         """Delete all nodes and edges belonging to a file in a project."""
-        await self._db.execute(
-            "DELETE FROM nodes WHERE file=? AND project_id=?", (file_path, project_id)
-        )
-        await self._db.execute(
-            "DELETE FROM edges WHERE file=? AND project_id=?", (file_path, project_id)
-        )
+        await self.delete_where("nodes", "file=$1 AND project_id=$2", (file_path, project_id))
+        await self.delete_where("edges", "file=$1 AND project_id=$2", (file_path, project_id))
         await self._db.commit()
 
     # ── MCP query tools ────────────────────────────────────────────────────
@@ -1568,9 +1587,7 @@ class CallGraphDB:
 
     async def update_contract_status(self, contract_id: str, status: str) -> None:
         """Set the status field on a contract (e.g. 'active' or 'draft')."""
-        await self._db.execute(
-            "UPDATE contracts SET status = ? WHERE id = ?", (status, contract_id)
-        )
+        await self.update_where("contracts", "status = $1", "id = $2", (status, contract_id))
         await self._db.commit()
 
     async def update_contract_structural(
@@ -1585,7 +1602,7 @@ class CallGraphDB:
 
     async def delete_contract(self, contract_id: str) -> None:
         """Hard-delete a contract and its cascading examples and violations."""
-        await self._db.execute("DELETE FROM contracts WHERE id = ?", (contract_id,))
+        await self.delete_where("contracts", "id = $1", (contract_id,))
         await self._db.commit()
 
     async def upsert_contract_examples(
@@ -1593,9 +1610,7 @@ class CallGraphDB:
     ) -> None:
         """Replace all examples for a contract. examples: [{type, code}]"""
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.execute(
-            "DELETE FROM contract_examples WHERE contract_id = ?", (contract_id,)
-        )
+        await self.delete_where("contract_examples", "contract_id = $1", (contract_id,))
         import uuid
         rows = [
             (str(uuid.uuid4()), contract_id, ex["type"], ex["code"], now)
@@ -2158,8 +2173,10 @@ class CallGraphDB:
     async def revoke_api_key(self, key_id: str, user_id: str) -> bool:
         """Revoke a key by ID, scoped to user_id. Returns True if a row was updated."""
         now = datetime.now(timezone.utc).isoformat()
-        result = await self._db.execute(
-            "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+        result = await self.update_where(
+            "api_keys",
+            "revoked_at = $1",
+            "id = $2 AND user_id = $3 AND revoked_at IS NULL",
             (now, key_id, user_id),
         )
         await self._db.commit()
@@ -2178,10 +2195,7 @@ class CallGraphDB:
             return None
         key_id = row["id"] if hasattr(row, "__getitem__") else row[0]
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.execute(
-            "UPDATE api_keys SET revoked_at = ? WHERE id = ?",
-            (now, key_id),
-        )
+        await self.update_where("api_keys", "revoked_at = $1", "id = $2", (now, key_id))
         await self._db.commit()
         return key_id
 
