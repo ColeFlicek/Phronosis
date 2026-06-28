@@ -4,8 +4,80 @@ Shared fixtures for Scopenos tests.
 GraphData and node construction helpers so individual test files
 don't repeat boilerplate. Tests that need a GraphData call _graph();
 tests that need a node dict call _node().
+
+The `db` fixture provides a real CallGraphDB connected to the test database.
+Each test gets a clean slate: all project schemas are dropped and control-plane
+tables are truncated before the fixture yields.
 """
+from __future__ import annotations
+
+import os
+
+import pytest
+import pytest_asyncio
+
 from src.call_graph.models import GraphData
+from src.call_graph.storage import CallGraphDB
+
+# ── Database fixture ──────────────────────────────────────────────────────────
+
+_TEST_DSN = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL", "")
+
+# Tables in the public schema that need truncating between tests.
+# Order matters: FK children before parents.
+_TRUNCATE_TABLES = [
+    "contract_violations",
+    "contract_examples",
+    "contracts",
+    "project_access",
+    "api_keys",
+    "projects",
+    "decisions",
+    "decision_function_links",
+    "performance_concerns",
+    "solid_concerns",
+    "agent_improvements",
+    "users",
+    "pattern_prototypes",
+    "embedding_cache",
+    "dependency_fingerprints",
+    "project_snapshots",
+    "demo_projects",
+    "organizations",
+]
+
+
+async def _clean_db(pool) -> None:
+    """Drop all non-system schemas and truncate control-plane tables."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT schema_name FROM information_schema.schemata "
+            "WHERE schema_name NOT IN ('public','pg_catalog','information_schema','pg_toast') "
+            "AND schema_name NOT LIKE 'pg_%'"
+        )
+        for row in rows:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{row["schema_name"]}" CASCADE')
+
+        for table in _TRUNCATE_TABLES:
+            await conn.execute(
+                f"TRUNCATE TABLE IF EXISTS {table} RESTART IDENTITY CASCADE"
+            )
+
+
+@pytest_asyncio.fixture
+async def db():
+    """Real CallGraphDB against the test database, reset before each test.
+
+    Skips automatically if no database URL is configured.
+    Set TEST_DATABASE_URL (preferred) or DATABASE_URL to enable.
+    """
+    if not _TEST_DSN:
+        pytest.skip("No database URL configured — set TEST_DATABASE_URL or DATABASE_URL")
+
+    instance = await CallGraphDB.create(_TEST_DSN)
+    await _clean_db(instance._pool)
+    yield instance
+    await instance.close()
 
 
 def _node(
