@@ -70,15 +70,21 @@ async def _apply_schema(conn: asyncpg.Connection, schema_sql_path: str) -> None:
     statements = _split_sql(sql_text)
     for stmt in statements:
         stmt = stmt.strip()
-        if stmt and not stmt.startswith("--"):
+        # Strip leading comment lines so a statement like "-- comment\nCREATE TABLE..."
+        # is not mistakenly treated as comment-only and skipped.
+        sql_only = "\n".join(
+            line for line in stmt.splitlines() if not line.strip().startswith("--")
+        ).strip()
+        if sql_only:
             await conn.execute(stmt)
 
 
 def _split_sql(sql: str) -> list[str]:
     """Split SQL text into individual statements.
 
-    Handles dollar-quoted string literals ($$...$$, $tag$...$tag$) which may
-    contain semicolons that must NOT be treated as statement terminators.
+    Handles dollar-quoted string literals ($$...$$, $tag$...$tag$) and
+    single-line comments (-- ... newline) which may contain semicolons that
+    must NOT be treated as statement terminators.
     """
     statements: list[str] = []
     current: list[str] = []
@@ -87,6 +93,15 @@ def _split_sql(sql: str) -> list[str]:
     dollar_tag = ""
 
     while i < len(sql):
+        # Single-line comment: consume through end of line without splitting.
+        if not in_dollar_quote and sql[i] == "-" and sql[i:i+2] == "--":
+            j = i
+            while j < len(sql) and sql[j] != "\n":
+                j += 1
+            current.append(sql[i:j])
+            i = j
+            continue
+
         # Detect start/end of dollar-quoted string
         if not in_dollar_quote and sql[i] == "$":
             # Scan for closing $ of the tag
@@ -220,29 +235,21 @@ async def provision_org(
     role_name = _role_name(slug)
     password = generate_password()
 
-    # Step 1: Create the database.
-    # asyncpg raises if we try CREATE DATABASE inside a transaction (BEGIN).
-    # Connecting directly and executing outside a transaction block is safe.
+    # Step 1: Create the database from template_vector, which has pgvector
+    # pre-installed.  template_vector is marked datistemplate=true so any role
+    # with CREATEDB can copy it — no superuser needed here.
     prov_conn = await asyncpg.connect(provisioner_dsn)
     try:
-        # asyncpg does not auto-wrap single statements in a transaction, so this
-        # executes with implicit autocommit at the protocol level.
-        await prov_conn.execute(f'CREATE DATABASE "{db_name}"')
+        await prov_conn.execute(f'CREATE DATABASE "{db_name}" TEMPLATE template_vector')
     finally:
         await prov_conn.close()
 
-    # Step 2: Connect to the new database and set it up.
+    # Step 2: Connect to the new database and apply the org schema.
     # Derive the org DB DSN from the provisioner DSN by replacing the dbname.
     parsed = _replace_dbname(provisioner_dsn, db_name)
     org_conn = await asyncpg.connect(parsed)
     try:
-        # pgvector extension (superuser required; provisioner must have it or be superuser)
-        try:
-            await org_conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        except Exception:
-            pass  # Non-fatal if vector is already installed or unavailable
-
-        # Apply org schema
+        # Apply org schema (idempotent: CREATE IF NOT EXISTS + ALTER IF NOT EXISTS)
         await _apply_schema(org_conn, schema_sql_path)
 
         # Create org role with login
