@@ -103,18 +103,26 @@ class EmbeddingStore:
 
         Other schema objects live in schema.sql; this table is created here
         because it is owned entirely by the embedding layer and needed lazily.
+        In provisioned org DBs the table already exists and the role has no
+        CREATE privilege — the InsufficientPrivilegeError is silently ignored.
         """
         conn = self._db._db
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS pattern_prototypes (
-                role             TEXT PRIMARY KEY,
-                vector           TEXT    NOT NULL,
-                description_hash TEXT    NOT NULL,
-                computed_at      TEXT    NOT NULL
-            )
-        """)
-        if hasattr(conn, "commit"):
-            await conn.commit()
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS pattern_prototypes (
+                    role             TEXT PRIMARY KEY,
+                    vector           TEXT    NOT NULL,
+                    description_hash TEXT    NOT NULL,
+                    computed_at      TEXT    NOT NULL
+                )
+            """)
+            if hasattr(conn, "commit"):
+                await conn.commit()
+        except Exception as exc:
+            if "permission denied" in str(exc).lower() or "insufficient privilege" in str(exc).lower():
+                pass  # table already exists in provisioned org DB
+            else:
+                raise
 
     def with_db(self, db) -> "EmbeddingStore":
         """Return a shallow copy of this store that uses a different DB pool.
