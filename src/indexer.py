@@ -531,12 +531,19 @@ class Indexer:
                 project_pipeline=ppipe,
             )
 
+        from .schema_objects import extract_python_class_objects, embed_and_store_schema_objects
+        class_objects = await extract_python_class_objects(pdb, project_id)
+        schema_count = await embed_and_store_schema_objects(
+            class_objects, self._pipeline._store.with_db(pdb), pdb, project_id
+        )
+
         result = {
             "status": "ok",
             "project_id": project_id,
             "files_updated": len([fp for fp in file_paths if file_contents.get(fp) is not None]),
             "functions_updated": len(updated_nodes),
             "functions_reembedded": len(changed_ids),
+            "schema_objects_indexed": schema_count,
             "function_ids": [n.id for n in updated_nodes],
         }
 

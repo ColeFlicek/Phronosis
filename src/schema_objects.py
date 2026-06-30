@@ -1,24 +1,11 @@
 """
 Schema object extraction and embedding for performance analysis.
 
-A "schema object" is any entity that can appear in multiple places in code
-and whose cardinality matters for performance reasoning:
-
-  - Database tables (from Postgres information_schema)
-  - Python classes/dataclasses from the call graph index
-
-Each object is embedded as a structured description that captures:
+A "schema object" is a Python class whose cardinality matters for performance
+reasoning. Each object is embedded as a structured description that captures:
   - What it represents
-  - What it contains (columns / methods / fields)
-  - What it relates to (FK references, inheritance)
+  - What methods it has
   - Its cardinality class: SCALAR | LOW | MEDIUM | HIGH | UNBOUNDED
-
-Cardinality class meanings:
-  SCALAR    — single value, not a collection (e.g. a config object)
-  LOW       — bounded small set, typically < 100 rows (e.g. projects, users)
-  MEDIUM    — grows with usage, typically 100–10K (e.g. decisions, contracts)
-  HIGH      — scales with data, typically > 10K (e.g. nodes, edges, embeddings)
-  UNBOUNDED — grows without bound, no natural cap
 
 When two HIGH/UNBOUNDED objects both appear in a nested call pattern, the
 pattern has O(n²) or worse potential and is flagged with high confidence.
@@ -35,83 +22,31 @@ if TYPE_CHECKING:
 
 # ── Cardinality heuristics ────────────────────────────────────────────────────
 
-# Tables whose cardinality is domain-known regardless of row count
+# Cardinality for well-known Python types
 _KNOWN_CARDINALITY: dict[str, str] = {
-    # Scopenos DB tables
-    "projects":                    "LOW",
-    "nodes":                       "HIGH",
-    "edges":                       "HIGH",
-    "function_embeddings":         "HIGH",
-    "decision_embeddings":         "MEDIUM",
-    "decisions":                   "MEDIUM",
-    "decision_functions":          "MEDIUM",
-    "contracts":                   "LOW",
-    "contract_examples":           "LOW",
-    "contract_violations":         "MEDIUM",
-    "agent_improvements":          "MEDIUM",
-    "project_home_snapshots":      "LOW",
-    "dependency_fingerprints":     "LOW",
-    "users":                       "LOW",
-    "api_keys":                    "LOW",
-    "project_access":              "LOW",
-    "demo_projects":               "LOW",
-    # Common Python collection classes
-    "list":     "HIGH",
-    "dict":     "HIGH",
-    "set":      "HIGH",
-    "tuple":    "MEDIUM",
-    "str":      "SCALAR",
-    "int":      "SCALAR",
-    "bool":     "SCALAR",
-    "None":     "SCALAR",
+    "list":  "HIGH",
+    "dict":  "HIGH",
+    "set":   "HIGH",
+    "tuple": "MEDIUM",
+    "str":   "SCALAR",
+    "int":   "SCALAR",
+    "bool":  "SCALAR",
+    "None":  "SCALAR",
 }
-
-def _cardinality_from_row_count(count: int) -> str:
-    if count < 10:
-        return "LOW"
-    if count < 1_000:
-        return "MEDIUM"
-    if count < 100_000:
-        return "HIGH"
-    return "UNBOUNDED"
 
 
 # ── SchemaObject ─────────────────────────────────────────────────────────────
 
 @dataclass
 class SchemaObject:
-    name: str                    # table name or class name
-    source: str                  # "db_table" | "python_class"
+    name: str                    # class name
+    source: str                  # always "python_class"
     project_id: str
     cardinality: str             # SCALAR | LOW | MEDIUM | HIGH | UNBOUNDED
     description: str             # structured text for embedding
-    references: list[str] = field(default_factory=list)   # tables/classes this references
+    references: list[str] = field(default_factory=list)
     referenced_by: list[str] = field(default_factory=list)
     embedding: list[float] | None = None
-
-
-def _table_description(
-    table: str,
-    columns: list[dict],
-    references: list[str],
-    referenced_by: list[str],
-    cardinality: str,
-    row_count: int | None,
-) -> str:
-    col_summary = ", ".join(
-        f"{c['name']} ({c['type']})"
-        for c in columns[:20]
-    )
-    parts = [
-        f"Database table: {table}",
-        f"Cardinality: {cardinality}" + (f" (~{row_count} rows)" if row_count else ""),
-        f"Columns: {col_summary}",
-    ]
-    if references:
-        parts.append(f"References (many-to-one): {', '.join(references)}")
-    if referenced_by:
-        parts.append(f"Referenced by (one-to-many): {', '.join(referenced_by)}")
-    return "\n".join(parts)
 
 
 def _class_description(
@@ -133,36 +68,8 @@ def _class_description(
 
 # ── Extraction ────────────────────────────────────────────────────────────────
 
-async def extract_db_schema_objects(db: "CallGraphDB", project_id: str) -> list[SchemaObject]:
-    """Build SchemaObjects from Postgres information_schema and pg_class via CallGraphDB."""
-    schema = await db.get_db_schema()
-    objects = []
-    for table_name, info in schema.items():
-        columns = info["columns"]
-        row_count = info["row_count"]
-        cardinality = _KNOWN_CARDINALITY.get(
-            table_name,
-            _cardinality_from_row_count(row_count) if row_count is not None else "MEDIUM"
-        )
-        references = list(dict.fromkeys(info["refs_out"]))
-        referenced_by = list(dict.fromkeys(info["refs_in"]))
-        desc = _table_description(
-            table_name, columns, references, referenced_by, cardinality, row_count
-        )
-        objects.append(SchemaObject(
-            name=table_name,
-            source="db_table",
-            project_id=project_id,
-            cardinality=cardinality,
-            description=desc,
-            references=references,
-            referenced_by=referenced_by,
-        ))
-    return objects
-
-
 async def extract_python_class_objects(db: "CallGraphDB", project_id: str) -> list[SchemaObject]:
-    """Build SchemaObjects for Python classes indexed in the call graph via CallGraphDB."""
+    """Build SchemaObjects for Python classes indexed in the call graph."""
     class_rows = await db.get_class_nodes(project_id)
     fn_rows = await db.get_function_nodes_light(project_id)
 
@@ -201,23 +108,6 @@ async def embed_and_store_schema_objects(
     if not objects:
         return 0
 
-    await db._db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_object_embeddings (
-            project_id    TEXT NOT NULL,
-            name          TEXT NOT NULL,
-            source        TEXT NOT NULL,
-            cardinality   TEXT NOT NULL,
-            description   TEXT NOT NULL,
-            refs          TEXT NOT NULL DEFAULT '[]',
-            refs_in       TEXT NOT NULL DEFAULT '[]',
-            embedding     vector(1536),
-            PRIMARY KEY (project_id, name, source)
-        )
-        """
-    )
-    await db._db.commit()
-
     texts = [o.description for o in objects]
     vecs = await embeddings._embed_batch(texts)
 
@@ -235,39 +125,13 @@ async def embed_and_store_schema_objects(
             vec,
         ))
 
-    await db._db.executemany(
-        """
-        INSERT INTO schema_object_embeddings
-            (project_id, name, source, cardinality, description, refs, refs_in, embedding)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (project_id, name, source) DO UPDATE SET
-            cardinality=excluded.cardinality,
-            description=excluded.description,
-            refs=excluded.refs,
-            refs_in=excluded.refs_in,
-            embedding=excluded.embedding
-        """,
-        rows,
-    )
-    await db._db.commit()
+    await db.upsert_schema_objects(rows)
     return len(objects)
 
 
 async def load_schema_objects(db: "CallGraphDB", project_id: str) -> list[SchemaObject]:
     """Load previously embedded schema objects for a project."""
-    try:
-        async with db._db.execute(
-            """
-            SELECT name, source, cardinality, description, refs, refs_in, embedding
-            FROM schema_object_embeddings
-            WHERE project_id = ?
-            """,
-            (project_id,),
-        ) as cur:
-            rows = await cur.fetchall()
-    except Exception:
-        return []
-
+    rows = await db.load_schema_objects(project_id)
     return [
         SchemaObject(
             name=r["name"],
@@ -289,29 +153,15 @@ async def index_schema_objects(
     db: "CallGraphDB",
     embeddings: "EmbeddingStore",
     project_id: str,
-    include_db_tables: bool = True,
 ) -> dict:
     """
-    Extract, embed, and store all schema objects for a project.
-    Call this after index_project to build the object embedding layer.
+    Extract, embed, and store Python class schema objects for a project.
+    Called automatically by index_changes after each index run.
     """
-    objects: list[SchemaObject] = []
-
-    if include_db_tables:
-        db_objects = await extract_db_schema_objects(db, project_id)
-        objects.extend(db_objects)
-        print(f"[schema] {len(db_objects)} DB table objects extracted")
-
-    class_objects = await extract_python_class_objects(db, project_id)
-    objects.extend(class_objects)
-    print(f"[schema] {len(class_objects)} Python class objects extracted")
-
+    objects = await extract_python_class_objects(db, project_id)
     count = await embed_and_store_schema_objects(objects, embeddings, db, project_id)
-    print(f"[schema] {count} schema objects embedded and stored")
-
     return {
         "project_id": project_id,
-        "db_tables": len([o for o in objects if o.source == "db_table"]),
-        "python_classes": len([o for o in objects if o.source == "python_class"]),
+        "python_classes": count,
         "total": count,
     }

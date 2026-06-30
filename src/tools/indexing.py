@@ -176,34 +176,6 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         return json.dumps({"job_id": job.id, "status": "queued"})
 
     @mcp.tool()
-    async def index_schema_objects(project_id: str, include_db_tables: bool = False) -> str:
-        """
-        Extract and embed schema objects for a project, building the object
-        embedding layer used by check_performance to score N+1 findings.
-
-        Two object types are extracted:
-        - Python classes from the call graph (all projects)
-        - Postgres DB tables with FK relationships and cardinality (set
-          include_db_tables=True for projects that use this Scopenos database)
-
-        Each object is embedded as a structured description capturing what it
-        represents, what it relates to, and its cardinality class (LOW / MEDIUM /
-        HIGH / UNBOUNDED). check_performance uses these embeddings to distinguish
-        high-cardinality correlated access patterns (likely real performance issues)
-        from low-cardinality intentional loops (likely fine).
-
-        Run this after index_project to enable object-embedding-enhanced scoring.
-        """
-        from ..schema_objects import index_schema_objects as _index
-        svcs = await _tools_shared.get_services()
-        await check_permission(get_current_user(), project_id, "write", svcs.db)
-        result = await _index(
-            svcs.db, svcs.embeddings, project_id,
-            include_db_tables=include_db_tables,
-        )
-        return json.dumps(result)
-
-    @mcp.tool()
     async def fork_project(
         project_id: str,
         commit_ref: str,

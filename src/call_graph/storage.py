@@ -1888,73 +1888,6 @@ class CallGraphDB:
         ) as cur:
             return {r["function_id"]: r["description"] for r in await cur.fetchall()}
 
-    async def get_db_schema(self, schema_name: str = "") -> dict[str, dict]:
-        """Database schema for tables in the given schema: columns, FK refs, row estimates.
-
-        Defaults to self._schema if set, otherwise 'public'.
-        Returns a dict keyed by table_name, each value containing:
-          columns: [{name, type}, ...]
-          refs_out: [table, ...]   (tables this table references via FK)
-          refs_in:  [table, ...]   (tables that reference this table via FK)
-          row_count: int | None    (pg_class estimate, may be -1 before ANALYZE)
-        """
-        target_schema = schema_name or self._schema or "public"
-
-        async with self._db.execute(
-            """
-            SELECT table_name, column_name, data_type
-            FROM information_schema.columns
-            WHERE table_schema = ?
-            ORDER BY table_name, ordinal_position
-            """,
-            (target_schema,),
-        ) as cur:
-            col_rows = await cur.fetchall()
-
-        tables: dict[str, dict] = {}
-        for r in col_rows:
-            tables.setdefault(r["table_name"], {
-                "columns": [], "refs_out": [], "refs_in": [], "row_count": None
-            })["columns"].append({"name": r["column_name"], "type": r["data_type"]})
-
-        async with self._db.execute(
-            """
-            SELECT tc.table_name  AS from_table,
-                   ccu.table_name AS to_table
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-                ON tc.constraint_name = kcu.constraint_name
-            JOIN information_schema.referential_constraints rc
-                ON tc.constraint_name = rc.constraint_name
-            JOIN information_schema.key_column_usage ccu
-                ON rc.unique_constraint_name = ccu.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_schema = ?
-            """,
-            (target_schema,),
-        ) as cur:
-            for r in await cur.fetchall():
-                if r["from_table"] in tables:
-                    tables[r["from_table"]]["refs_out"].append(r["to_table"])
-                if r["to_table"] in tables:
-                    tables[r["to_table"]]["refs_in"].append(r["from_table"])
-
-        async with self._db.execute(
-            """
-            SELECT relname AS table_name, reltuples::BIGINT AS row_estimate
-            FROM pg_class
-            WHERE relkind = 'r' AND relnamespace = (
-                SELECT oid FROM pg_namespace WHERE nspname = ?
-            )
-            """,
-            (target_schema,),
-        ) as cur:
-            for r in await cur.fetchall():
-                if r["table_name"] in tables:
-                    tables[r["table_name"]]["row_count"] = r["row_estimate"]
-
-        return tables
-
     async def get_class_nodes(self, project_id: str) -> list[dict]:
         """All class-type nodes for a project (id, name, module, docstring, signature)."""
         async with self._db.execute(
@@ -1973,6 +1906,38 @@ class CallGraphDB:
             (project_id,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    async def upsert_schema_objects(self, rows: list[tuple]) -> None:
+        """Upsert (project_id, name, source, cardinality, description, refs, refs_in, embedding) rows."""
+        await self._db.executemany(
+            """
+            INSERT INTO schema_object_embeddings
+                (project_id, name, source, cardinality, description, refs, refs_in, embedding)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (project_id, name, source) DO UPDATE SET
+                cardinality=excluded.cardinality,
+                description=excluded.description,
+                refs=excluded.refs,
+                refs_in=excluded.refs_in,
+                embedding=excluded.embedding
+            """,
+            rows,
+        )
+
+    async def load_schema_objects(self, project_id: str) -> list[dict]:
+        """Load schema object rows for a project from schema_object_embeddings."""
+        try:
+            async with self._db.execute(
+                """
+                SELECT name, source, cardinality, description, refs, refs_in, embedding
+                FROM schema_object_embeddings
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception:
+            return []
 
     async def get_decisions_by_ids(
         self, ids: list[str], project_id: str | None = None
