@@ -66,8 +66,7 @@ async def main(is_admin: bool) -> None:
     else:
         print("Update .mcp.json with this key, then restart the indexer session.", file=sys.stderr)
 
-    # Print raw key to stdout for scripting
-    print(raw_key)
+    print(raw_key)  # raw key to stdout for scripting
 
 
 if __name__ == "__main__":
