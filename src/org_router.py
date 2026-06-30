@@ -81,7 +81,7 @@ class OrgRouter:
 
     async def log_no_key_event(self, endpoint: str = "") -> None:
         """Log a no-key-sent auth event. Called for requests with no X-API-Key header."""
-        _SKIP = {"/api/health", "/admin/", "/favicon.ico"}
+        _SKIP = {"/api/health", "/api/ready", "/admin/", "/favicon.ico"}
         if endpoint in _SKIP or endpoint.startswith("/admin/") and endpoint.endswith(".html"):
             return
         await self._control_db.log_auth_event(None, "no-key-sent", endpoint)
