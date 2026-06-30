@@ -42,10 +42,7 @@ _ALLOWED = {
 
 # Known remaining violations — fix these before removing from this list.
 # Each entry must have a comment explaining what it accesses and why it's deferred.
-_KNOWN_VIOLATIONS = {
-    "web/routes.py",   # accesses nodes, edges, decisions — needs count_* methods
-                       # in CallGraphDB; deferred from the Candidate 5 refactor.
-}
+_KNOWN_VIOLATIONS: set[str] = set()
 
 # schema_objects.py is a special case: it owns schema_object_embeddings and
 # may access that table.  It must NOT access any other table via _db directly.

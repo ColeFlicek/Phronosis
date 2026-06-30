@@ -44,29 +44,23 @@ async def main(
         os.getenv("CONTROL_DB_URL")
         or os.getenv("DATABASE_URL", "postgresql://scopenos:scopenos@localhost/scopenos")
     )
-    db = await CallGraphDB.create(dsn)
+    db = await CallGraphDB.create(dsn, skip_schema_init=True)
 
     try:
         user = await db.create_user(email, plan=plan)
         print(f"Created user: {user['email']} (id: {user['id']}, plan: {user['plan']})")
     except Exception:
-        async with db._db.execute(
-            "SELECT id, email, plan FROM users WHERE email = ?", (email,)
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
+        existing = await db.get_user_by_email(email)
+        if existing is None:
             print(f"Error: could not create or find user '{email}'", file=sys.stderr)
             sys.exit(1)
-        user = dict(row)
+        user = existing
         print(f"User already exists: {user['email']} (id: {user['id']}, plan: {user['plan']})")
 
     if org_id:
-        # Verify the org exists before associating the key
-        async with db._db.execute(
-            "SELECT id FROM organizations WHERE slug = ?", (org_id,)
-        ) as cur:
-            org_row = await cur.fetchone()
-        if org_row is None:
+        # Verify the org exists in the control plane before issuing a scoped key
+        org_url = await db.get_org_db_url(org_id)
+        if not org_url:
             print(
                 f"Error: org '{org_id}' not found in control DB. "
                 f"Run: python scripts/provision_org.py provision {org_id}",
@@ -74,25 +68,19 @@ async def main(
             )
             await db.close()
             sys.exit(1)
-        # Set org_id on the user row
-        async with db._db.execute(
-            "UPDATE users SET org_id = ? WHERE id = ?",
-            (org_id, user["id"]),
-        ):
-            pass
-        print(f"Associated user with org '{org_id}'")
+        print(f"Issuing key scoped to org '{org_id}'")
 
     if project_id:
         await db._db.execute(
             """INSERT INTO project_access (user_id, project_id, role)
-               VALUES ($1, $2, $3)
+               VALUES (?, ?, ?)
                ON CONFLICT (user_id, project_id) DO UPDATE SET role = excluded.role""",
             (user["id"], project_id, role),
         )
         await db._db.commit()
         print(f"Granted {role} access to project '{project_id}'")
 
-    raw_key = await db.create_api_key(user["id"], name=key_name)
+    raw_key = await db.create_api_key(user["id"], name=key_name, org_id=org_id)
 
     print()
     print("API key (shown once — copy it now):")

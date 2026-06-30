@@ -49,7 +49,7 @@ For each question, answer using ONLY these tools:
 - `mcp__scopenos__get_callers`
 - `mcp__scopenos__get_callees`
 - `mcp__scopenos__query_similar_functions`
-- `mcp__scopenos__query_decisions`
+- `mcp__scopenos__search_decisions`
 
 Do NOT read any files. Do NOT use grep or Bash.
 

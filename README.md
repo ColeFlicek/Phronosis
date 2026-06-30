@@ -107,7 +107,7 @@ find_dependents(symbol, project_id)            — everything that depends on th
 // Decision memory
 log_decision(type, description, ...)           — record an architectural/design decision
 get_decision_history(function_name)            — full decision lineage for a function
-query_decisions(query_text)                    — semantic search over all decisions
+search_decisions(query_text)                    — semantic search over all decisions
 
 // Invariant Contracts
 create_contract(project_id, rule_type, ...)    — define an architectural rule

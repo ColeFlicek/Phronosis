@@ -175,7 +175,7 @@ class TestProvisionOrgMocked:
             )
 
         # DB was created on provisioner connection
-        mock_prov_conn.execute.assert_any_call('CREATE DATABASE "org_acme"')
+        mock_prov_conn.execute.assert_any_call('CREATE DATABASE "org_acme" TEMPLATE template_vector')
         # Provisioner connection was closed
         mock_prov_conn.close.assert_called_once()
 

@@ -118,7 +118,7 @@ Network-restrict port 3004 to trusted IP ranges before public launch."
 | `get_function_context` | Unified pipeline: node + callers + callees + impact + decisions + similar |
 | `find_dependents` | Correct dependent set for `CallGraphDB` |
 | `get_decision_history` | Returns decision array with `_guidance` |
-| `query_decisions` | Semantic search correct — ArchitectureService decision surfaced at 0.83 |
+| `search_decisions` | Semantic search correct — ArchitectureService decision surfaced at 0.83 |
 | `list_contracts` | Returns empty correctly when no contracts active |
 | `check_contracts` | Returns empty violations correctly |
 | `list_improvements` | Returns empty when no open improvements |

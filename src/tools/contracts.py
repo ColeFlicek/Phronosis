@@ -138,7 +138,9 @@ def register(mcp: FastMCP, get_services: Callable) -> None:
         semantic=True: also runs embedding checks against every project function.
         Expensive on large projects — use on small codebases or focused subsets.
         """
+        from . import _shared as _tools_shared
         svcs = await get_services()
         await check_read_access(project_id, svcs.db)
-        result = await svcs.contracts.check_project(project_id, semantic=semantic)
+        pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
+        result = await svcs.contracts.check_project(project_id, semantic=semantic, pdb=pdb)
         return json.dumps(result)

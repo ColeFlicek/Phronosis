@@ -221,13 +221,16 @@ Return ONLY the JSON object, no markdown, no explanation."""
 
     # ── Checking ───────────────────────────────────────────────────────────
 
-    async def check_project(self, project_id: str, semantic: bool = False) -> list[dict]:
+    async def check_project(self, project_id: str, semantic: bool = False, pdb=None) -> list[dict]:
         """Run all active contracts against a project's call graph and return all violations.
 
         semantic=False (default): structural call-graph checks only — fast, suitable for CI.
         semantic=True: also runs embedding-based semantic checks against every project
         function. Expensive for large projects — use on focused subsets or small codebases.
+        pdb: project-scoped CallGraphDB for node/callee lookups. Falls back to self._db
+             (org-level) when omitted — callers should always pass this for correct routing.
         """
+        _pdb = pdb or self._db
         contracts = await self._db.list_contracts(project_id)
         active = [c for c in contracts if c["status"] == "active"]
         if not active:
@@ -240,11 +243,12 @@ Return ONLY the JSON object, no markdown, no explanation."""
             new_viols = await self._check_structural(
                 contract["id"], project_id, structural_expr,
                 function_ids=scoped_ids if scoped_ids else None,
+                pdb=_pdb,
             )
             violations.extend(new_viols)
 
         if semantic:
-            nodes_by_id = await self._db.get_nodes_with_bodies(project_id)
+            nodes_by_id = await _pdb.get_nodes_with_bodies(project_id)
             for fid, node in nodes_by_id.items():
                 if not node.get("is_external"):
                     body = node.get("body", "") or ""
@@ -281,9 +285,13 @@ Return ONLY the JSON object, no markdown, no explanation."""
         return violations
 
     async def check_functions(
-        self, project_id: str, function_ids: list[str]
+        self, project_id: str, function_ids: list[str], pdb=None,
     ) -> list[dict]:
-        """Check a specific set of function IDs against all active contracts (used by the post-commit hook)."""
+        """Check a specific set of function IDs against all active contracts (used by the post-commit hook).
+
+        pdb: project-scoped CallGraphDB for node/callee lookups. Callers should always pass this.
+        """
+        _pdb = pdb or self._db
         contracts = await self._db.list_contracts(project_id)
         active = [c for c in contracts if c["status"] == "active"]
         if not active or not function_ids:
@@ -295,12 +303,12 @@ Return ONLY the JSON object, no markdown, no explanation."""
             for fid in function_ids:
                 # Structural check for this specific function.
                 viols = await self._check_structural_for_function(
-                    contract["id"], project_id, fid, rule
+                    contract["id"], project_id, fid, rule, pdb=_pdb,
                 )
                 violations.extend(viols)
 
                 # Semantic check: embed the function's body text.
-                node = await self._db.get_node(fid, project_id)
+                node = await _pdb.get_node(fid, project_id)
                 if node:
                     body = node.get("body", "") or ""
                     snippet = "\n".join(filter(None, [
@@ -334,17 +342,20 @@ Return ONLY the JSON object, no markdown, no explanation."""
     async def _check_structural(
         self, contract_id: str, project_id: str, expr: dict,
         function_ids: list[str] | None = None,
+        pdb=None,
     ) -> list[dict]:
         """Scan project functions for structural violations via call-graph traversal.
 
         function_ids: when provided, only these functions are checked (pattern-scoped
         contracts). When None, the entire project is scanned.
+        pdb: project-scoped DB for node/callee lookups.
         """
+        _pdb = pdb or self._db
         rule = ContractRule.from_expr(expr)
         violations: list[dict] = []
 
         if rule.needs_metadata_check():
-            rows = await self._db.get_nodes_missing_docstring(
+            rows = await _pdb.get_nodes_missing_docstring(
                 project_id, exclude_names=rule.excluded_names()
             )
             for row in rows:
@@ -368,12 +379,12 @@ Return ONLY the JSON object, no markdown, no explanation."""
         if not rule.needs_call_graph_check():
             return violations
 
-        caller_ids = function_ids if function_ids is not None else await self._db.get_all_caller_ids(project_id)
+        caller_ids = function_ids if function_ids is not None else await _pdb.get_all_caller_ids(project_id)
         for caller_id in caller_ids:
             if rule.is_excluded(caller_id):
                 continue
             viols = await self._check_structural_for_function(
-                contract_id, project_id, caller_id, rule
+                contract_id, project_id, caller_id, rule, pdb=_pdb,
             )
             violations.extend(viols)
         return violations
@@ -385,6 +396,7 @@ Return ONLY the JSON object, no markdown, no explanation."""
         function_id: str,
         rule: ContractRule,
         depth: int = 2,
+        pdb=None,
     ) -> list[dict]:
         """Check one function against a ContractRule, BFS up to `depth` callee levels.
 
@@ -395,6 +407,7 @@ Return ONLY the JSON object, no markdown, no explanation."""
         if rule.is_excluded(function_id) or not rule.needs_call_graph_check():
             return []
 
+        _pdb = pdb or self._db
         # BFS: collect all callee IDs up to `depth` hops from function_id
         visited: set[str] = {function_id}
         frontier: list[str] = [function_id]
@@ -402,7 +415,7 @@ Return ONLY the JSON object, no markdown, no explanation."""
         for _ in range(depth):
             next_frontier: list[str] = []
             for fid in frontier:
-                callees = await self._db.get_callees(fid, project_id)
+                callees = await _pdb.get_callees(fid, project_id)
                 for c in callees:
                     cid = c["id"]
                     if cid not in visited:

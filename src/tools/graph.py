@@ -181,7 +181,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         await check_read_access(project_id, svcs.db)
         pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
         results = await pdb.get_callers(function_name, project_id or None)
-        _contracts = await contracts_for_name(svcs.db, function_name, project_id)
+        _contracts = await contracts_for_name(pdb, function_name, project_id)
         out: dict = {"callers": results, "_guidance": compute_callers_guidance(results, function_name)}
         if _contracts:
             out["applicable_contracts"] = fmt_contracts(_contracts)
@@ -201,7 +201,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         await check_read_access(project_id, svcs.db)
         pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
         results = await pdb.get_callees(function_name, project_id or None)
-        _contracts = await contracts_for_name(svcs.db, function_name, project_id)
+        _contracts = await contracts_for_name(pdb, function_name, project_id)
         out: dict = {"callees": results, "_guidance": compute_callees_guidance(results, function_name)}
         if _contracts:
             out["applicable_contracts"] = fmt_contracts(_contracts)
@@ -236,7 +236,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
 
         results, _contracts = await _asyncio.gather(
             pdb.get_impact_radius(function_name, depth, pid),
-            contracts_for_name(svcs.db, function_name, project_id),
+            contracts_for_name(pdb, function_name, project_id),
         )
 
         hints = await _co_change_hints(function_name, results, pdb, pemb, pid)
@@ -302,131 +302,6 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
             guidance = await compute_guidance(results, pdb, project_id)
             return json.dumps({"results": results, "_guidance": guidance.to_dict()})
         return json.dumps(results)
-
-    @mcp.tool()
-    async def get_function_context(
-        query: str,
-        project_id: str = "",
-        depth: int = 2,
-    ) -> str:
-        """
-        [PRIMARY ENTRY POINT — accepts natural language OR a symbol name]
-
-        One-call unified context pipeline. Runs semantic search to find the right
-        function, then chains call graph traversal and decision memory into a single
-        enriched payload. The agent never needs to call individual layer tools.
-
-        Pipeline (Step 1: semantic search → Step 2: call graph → Step 3: decisions).
-
-        query: natural language ("state transition function") OR a known symbol name.
-               Semantic search runs first; symbol lookup is the fallback.
-        project_id: limit to a specific project. If omitted, searches all projects.
-        depth: call graph traversal depth (default 2).
-        """
-        import asyncio as _asyncio
-        svcs = await _tools_shared.get_services()
-        await check_read_access(project_id, svcs.db)
-        pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
-        decisions = svcs.decisions
-        embeddings = svcs.embeddings.with_db(pdb)
-
-        pid = project_id or None
-
-        node = None
-        semantic_hits = await embeddings.query_similar(query, top_k=5, project_id=pid)
-        if semantic_hits:
-            top_id = semantic_hits[0].get("id", "")
-            name_hits = await pdb.find_node_by_name(top_id, pid)
-            if name_hits:
-                node = name_hits[0]
-
-        if node is None:
-            name_hits = await pdb.find_node_by_name(query, pid)
-            if name_hits:
-                node = name_hits[0]
-
-        if node is None:
-            return json.dumps({
-                "error": (
-                    f"No function found matching '{query}'. "
-                    "Try a more specific description or call index_project first."
-                )
-            })
-
-        node_id = node["id"]
-        node_project = node.get("project_id", project_id)
-
-        from ..pattern_detector import detect_patterns, serialize_patterns
-
-        callers_task = _asyncio.create_task(pdb.get_callers(node_id, node_project))
-        callees_task = _asyncio.create_task(pdb.get_callees(node_id, node_project))
-        impact_task = _asyncio.create_task(pdb.get_impact_radius(node_id, depth, node_project))
-        history_task = _asyncio.create_task(decisions.get_decision_history(node_id, node_project))
-        similar_task = _asyncio.create_task(
-            embeddings.query_similar(
-                node.get("signature", "") + " " + node.get("docstring", ""),
-                top_k=6,
-                project_id=node_project,
-            )
-        )
-        contracts_task = _asyncio.create_task(
-            svcs.db.get_contracts_for_function(node_id, node_project)
-        )
-        patterns_task = _asyncio.create_task(
-            detect_patterns(node, pdb, node_project, embedder=embeddings)
-        )
-
-        callers, callees, impact, history, similar, _contracts, patterns = await _asyncio.gather(
-            callers_task, callees_task, impact_task, history_task, similar_task, contracts_task,
-            patterns_task,
-            return_exceptions=True,
-        )
-
-        def _safe(val, default):
-            return default if isinstance(val, Exception) else val
-
-        similar_clean = [
-            s for s in _safe(similar, [])
-            if s.get("id") != node_id
-        ][:5]
-
-        param_names = node.get("parameter_names")
-        if isinstance(param_names, str):
-            import json as _j
-            try:
-                param_names = _j.loads(param_names)
-            except Exception:
-                param_names = []
-
-        pattern_list = serialize_patterns(_safe(patterns, []))
-
-        out: dict = {
-            "node": {
-                "id": node_id,
-                "name": node.get("name"),
-                "file": node.get("file"),
-                "module": node.get("module"),
-                "type": node.get("type"),
-                "signature": node.get("signature"),
-                "docstring": node.get("docstring"),
-                "summary": node.get("summary"),
-                "start_line": node.get("start_line", 0),
-                "end_line": node.get("end_line", 0),
-                "return_type": node.get("return_type", ""),
-                "is_async": bool(node.get("is_async", 0)),
-                "parameter_names": param_names or [],
-                "enclosing_class": node.get("enclosing_class", ""),
-            },
-            "callers": _safe(callers, []),
-            "callees": _safe(callees, []),
-            "impact_radius": _safe(impact, []),
-            "decision_history": _safe(history, []),
-            "similar_functions": similar_clean,
-            "applicable_contracts": fmt_contracts(_safe(_contracts, [])),
-        }
-        if pattern_list:
-            out["design_patterns"] = pattern_list
-        return json.dumps(out)
 
     @mcp.tool()
     async def find_dependents(

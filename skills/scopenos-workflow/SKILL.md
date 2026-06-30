@@ -25,7 +25,7 @@ get_impact_radius("<function>", depth=2)         # what breaks if this changes?
 get_decision_history("<function>")               # why was this designed this way?
 get_callers("<function>")                        # who calls this?
 get_callees("<function>")                        # what does this call?
-query_decisions("<topic>")                       # prior decisions on a topic
+search_decisions("<topic>")                       # prior decisions on a topic
 ```
 
 **Tier 3 — file reads, precision only:**
@@ -58,7 +58,7 @@ whether a concurrent agent modified this function since your last session.
 | What does this call? | `get_callees(function_name)` |
 | What breaks if I change X? | `get_impact_radius(function_name, depth=2)` |
 | Why was this designed this way? | `get_decision_history(function_name)` |
-| Prior decisions on a topic | `query_decisions(query_text)` |
+| Prior decisions on a topic | `search_decisions(query_text)` |
 | Full project snapshot | `get_project_home(project_id)` |
 | What changed since last session | `get_project_home` → `since_last_session` field |
 

@@ -14,7 +14,6 @@ from .embeddings.chunker import extract_chunks
 from .embeddings.pipeline import EmbeddingPipeline
 from .index_delta import IndexDelta, reconcile
 from .index_coverage import IndexCoverage
-from .lsif_import import LsifImporter
 from .scip_import import ScipImporter
 
 _SUPPORTED_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx"}
@@ -278,6 +277,7 @@ class Indexer:
         project_id: str,
         project_root: str,
         branch_override: str = "",
+        head_commit_override: str = "",
         ids_to_embed: set[str],
         changed_fn_ids: list[str],
         existing_summaries: dict[str, str],
@@ -318,10 +318,18 @@ class Indexer:
                 existing_summaries=existing_summaries or None,
             )
 
+        # Warmup GoF pattern prototypes (idempotent — skips roles whose hash matches)
+        try:
+            from .pattern_prototypes import ROLE_DESCRIPTIONS, ensure_prototype
+            for role in ROLE_DESCRIPTIONS:
+                await ensure_prototype(role, self._pipeline, self._pipeline)
+        except Exception:
+            pass  # non-fatal — pattern detection degrades gracefully without prototypes
+
         # Phase 2: Update project record + branch
         ctx = detect_branch(project_root)
         effective_branch = branch_override or ctx.branch
-        head_commit = ctx.head_commit
+        head_commit = head_commit_override or ctx.head_commit
         # upsert_project goes to the org-level DB (public.projects registry)
         await self._db.upsert_project(
             project_id, project_id, project_root,
@@ -330,6 +338,31 @@ class Indexer:
         await pdb.record_branch_changes(
             project_id, effective_branch, changed_fn_ids, head_commit
         )
+
+        # Auto-log a Patch decision for deterministic body changes so
+        # get_decision_history returns results even without explicit log_decision calls.
+        if changed_fn_ids and head_commit:
+            try:
+                from .decision_memory.memory import DecisionMemory as _DM
+                dm = _DM(pdb, ppipe)
+                n = len(changed_fn_ids)
+                others = [f for f in changed_fn_ids]
+                co_changed = ", ".join(others[:20])
+                suffix = f" (+{len(others) - 20} more)" if len(others) > 20 else ""
+                await dm.log_decision(
+                    type="Patch",
+                    description=(
+                        f"Body hash changed at {head_commit[:8]} on "
+                        f"{effective_branch or 'unknown branch'}. "
+                        f"Co-changed with: {co_changed}{suffix}. "
+                        f"No explicit rationale recorded — see git history."
+                    ),
+                    trigger=f"git:{head_commit[:8]}",
+                    linked_function_ids=changed_fn_ids,
+                    project_id=project_id,
+                )
+            except Exception:
+                pass  # non-fatal — decision logging never blocks indexing
 
         # Phase 3: Fingerprint
         if not capture_fingerprint:
@@ -398,6 +431,8 @@ class Indexer:
         file_contents: dict[str, str],
         project_root: str = "",
         project_id: str = "",
+        branch: str = "",
+        head_commit: str = "",
     ) -> dict:
         """
         Incremental update for changed files.
@@ -484,7 +519,8 @@ class Indexer:
             embed_stats, _ = await self._finalize_index(
                 project_id=project_id,
                 project_root=project_root,
-                branch_override="",
+                branch_override=branch,
+                head_commit_override=head_commit,
                 ids_to_embed=changed_ids,
                 changed_fn_ids=list(changed_ids),
                 existing_summaries=existing_summaries,
@@ -684,57 +720,6 @@ class Indexer:
             )
         return result
 
-
-    async def index_lsif(self, path: str, project_id: str = "") -> dict:
-        """Ingest an LSIF NDJSON index file into Scopenos.
-
-        Extracts symbol definitions with their hover documentation and imports
-        them as FunctionNode records into the call-graph + embedding pipeline.
-        Call-edge resolution is deferred to a future version.
-
-        path: filesystem path to the .lsif file on the Scopenos server.
-        project_id: target project namespace (defaults to lsif filename stem).
-        """
-        if not project_id:
-            project_id = Path(path).stem or "lsif"
-
-        try:
-            importer = LsifImporter(project_root=str(Path(path).parent))
-            nodes, edges = importer.parse(path)
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
-
-        if not nodes:
-            return {"status": "ok", "project_id": project_id, "symbols_imported": 0,
-                    "note": "No definition symbols found in LSIF file."}
-
-        await self._db.upsert_nodes(nodes, project_id)
-        all_ids = await self._db.get_all_node_ids(project_id)
-        if edges:
-            await self._db.upsert_edges(edges, all_ids, project_id)
-        await self._db.upsert_project(project_id, project_id, str(Path(path).parent))
-
-        chunks = []
-        for n in nodes:
-            from .embeddings.chunker import FunctionChunk
-            chunks.append(FunctionChunk(
-                id=n.id, name=n.name, signature=n.signature,
-                docstring=n.docstring, leading_comment=n.leading_comment,
-                summary="", file=n.file, module=n.module,
-                type=n.type, body=n.body, embed_text="",
-            ))
-        embed_stats = {"docs": 0, "fallback": 0}
-        if chunks:
-            embed_stats = await self._pipeline.upsert_chunks(chunks, project_id=project_id)
-
-        return {
-            "status": "ok",
-            "project_id": project_id,
-            "symbols_imported": len(nodes),
-            "edges_imported": len(edges),
-            "embedded_with_docs": embed_stats["docs"],
-            "embedded_large_fallback": embed_stats["fallback"],
-        }
 
     async def index_scip(self, path: str, project_id: str = "") -> dict:
         """Ingest a SCIP JSON index file into Scopenos.

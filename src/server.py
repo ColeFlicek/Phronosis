@@ -143,7 +143,7 @@ Core tools:
 - check_contracts: verify invariants; contract_violations in index responses are blocking
 
 project_id is a stable slug (e.g. "scopenos", "django"). Use the same value consistently.
-Use index_project_files (not index_project) when the project lives on a different machine than the server.
+Use index_project to send file contents from the client — no server filesystem access required.
 """
 
 mcp = FastMCP("scopenos", lifespan=lifespan, instructions=_SCOPENOS_MCP_INSTRUCTIONS)

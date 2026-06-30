@@ -36,9 +36,12 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         parent_decision_id: enables tree traversal from architectural down to patch level
         project_id: project this decision belongs to (default: "default")
         """
+        from ..decision_memory.memory import DecisionMemory as _DM
         svcs = await _tools_shared.get_services()
         await check_permission(get_current_user(), project_id, "write", svcs.db)
-        result = await svcs.decisions.log_decision(
+        pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
+        dm = _DM(pdb, svcs.embeddings.with_db(pdb))
+        result = await dm.log_decision(
             type=type,
             description=description,
             rejected_alternatives=rejected_alternatives,
@@ -61,9 +64,12 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         project_id: required — scope results to this project. Pass "" to search all projects.
         """
         from ..guidance import compute_decision_guidance
+        from ..decision_memory.memory import DecisionMemory as _DM
         svcs = await _tools_shared.get_services()
         await check_read_access(project_id, svcs.db)
-        results = await svcs.decisions.get_decision_history(
+        pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
+        dm = _DM(pdb, svcs.embeddings.with_db(pdb))
+        results = await dm.get_decision_history(
             function_name, project_id or None
         )
         return json.dumps({
@@ -72,7 +78,7 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         })
 
     @mcp.tool()
-    async def query_decisions(
+    async def search_decisions(
         query_text: str, project_id: str = ""
     ) -> str:
         """
@@ -82,6 +88,10 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         decisions that are relevant to a new change, even if they are not linked
         to the specific function you are editing.  Input is plain English intent,
         not a symbol name.
+
+        Complements get_decision_history: use this when you don't know the function
+        name but have a topic or intent (e.g. "embedding strategy", "auth token
+        storage"). Use get_decision_history when you have a specific function name.
 
         project_id: limit results to a specific project. If omitted, searches all projects.
         """
@@ -95,5 +105,5 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> None:
         )
         return json.dumps(results)
 
-    for _fn in [log_decision, get_decision_history, query_decisions]:
+    for _fn in [log_decision, get_decision_history, search_decisions]:
         setattr(_mod, _fn.__name__, _fn)

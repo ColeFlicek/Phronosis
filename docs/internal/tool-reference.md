@@ -112,12 +112,12 @@ All logged architectural decisions linked to this function — why it was design
 
 ---
 
-### `query_decisions(query_text, project_id?)`
+### `search_decisions(query_text, project_id?)`
 Semantic search over decision memory. Finds decisions by topic, not by function name.
 
 **Example:**
 ```
-query_decisions("why did we choose ContextVar over threading.local")
+search_decisions("why did we choose ContextVar over threading.local")
 → [{"description": "Auth uses ContextVar for per-request user...", "similarity": 0.83}]
 ```
 

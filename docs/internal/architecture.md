@@ -10,7 +10,7 @@ Internal reference. Not for public docs — contains rationale for rejected desi
 ┌─────────────────────────────────────────────────────────────┐
 │  Layer 4: Decision Memory                                   │
 │  Why things are the way they are. Survives code changes.    │
-│  Tools: log_decision, get_decision_history, query_decisions │
+│  Tools: log_decision, get_decision_history, search_decisions │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 3: Invariant Contracts                               │
 │  Rules the codebase must not violate. Enforced post-commit. │
@@ -55,7 +55,7 @@ Each layer uses the one below. Contracts reference functions from the call graph
 
 **Two embedding types:**
 - Function embeddings: indexed at `index_project` / `index_changes` time
-- Decision embeddings: indexed when `log_decision` is called (for `query_decisions`)
+- Decision embeddings: indexed when `log_decision` is called (for `search_decisions`)
 - Contract embeddings: indexed when `approve_contract` is called (for `check_contracts`)
 
 **Enrichment:** Functions without docstrings get a body-text embedding, which is lower quality. `enrich_summaries` runs Claude Haiku on these to generate summaries before re-embedding. The `needs_enrichment` flag (TODO: see roadmap) should replace the current `embedding_model` string check.

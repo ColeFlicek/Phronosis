@@ -181,7 +181,7 @@ def cmd_evaluate(args) -> None:
     scopenos_tools = {
         "get_project_home", "query_similar_functions", "get_impact_radius",
         "get_callers", "get_callees", "get_subsystem_detail",
-        "get_decision_history", "query_decisions",
+        "get_decision_history", "search_decisions",
     }
     tool_names = [e.get("tool", "unknown") for e in agent_result.tool_calls]
     scopenos_calls = [e for e in agent_result.tool_calls if e.get("tool") in scopenos_tools]

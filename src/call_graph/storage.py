@@ -2113,7 +2113,7 @@ class CallGraphDB:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def create_api_key(self, user_id: str, name: str = "") -> str:
+    async def create_api_key(self, user_id: str, name: str = "", org_id: str = "") -> str:
         """Create an API key for a user. Returns the raw key once — never stored."""
         import hashlib
         import secrets
@@ -2122,8 +2122,8 @@ class CallGraphDB:
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
-            "INSERT INTO api_keys (id, user_id, key_hash, name, created_at) VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), user_id, key_hash, name, now),
+            "INSERT INTO api_keys (id, user_id, key_hash, name, created_at, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), user_id, key_hash, name, now, org_id or None),
         )
         await self._db.commit()
         return raw_key

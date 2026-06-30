@@ -84,8 +84,15 @@ trade-off or rejected approach that won't be captured by a commit.
 
 ## Initial setup (run once per project)
 
-```
-index_project("/absolute/path/to/project")
+```python
+# Collect all source files and send to the server
+import os
+files = {
+    os.path.join(root, f): open(os.path.join(root, f)).read()
+    for root, _, fnames in os.walk("/path/to/project")
+    for f in fnames if f.endswith(".py")
+}
+index_project(files=files, project_id="myapp", project_root="/path/to/project")
 ```
 
 ## MCP server config

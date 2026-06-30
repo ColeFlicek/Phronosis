@@ -9,49 +9,12 @@ from fastmcp import FastMCP
 
 from ..auth import get_current_user, check_permission
 from ..indexer import _derive_project_id
-from ..jobs import run_index_project, run_enrich_summaries, run_reembed_project
+from ..jobs import run_enrich_summaries, run_reembed_project
 from ._shared import check_and_enqueue
 from . import _shared as _tools_shared
 
 
 def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
-
-    @mcp.tool()
-    async def warmup_pattern_prototypes() -> str:
-        """
-        [MAINTENANCE TOOL — no arguments]
-
-        Pre-compute and persist prototype embedding vectors for all GoF pattern
-        roles defined in pattern_prototypes.py. Each role's 10 descriptions are
-        embedded and averaged into a centroid stored in the pattern_prototypes table.
-
-        Safe to call multiple times — roles whose description_hash matches the
-        stored row are skipped (already current). Only re-embeds when descriptions
-        change.
-
-        Returns a summary of which roles were computed vs. loaded from cache.
-        """
-        svcs = await _tools_shared.get_services()
-        from ..pattern_prototypes import ROLE_DESCRIPTIONS, ensure_prototype, _description_hash
-
-        computed, cached, failed = [], [], []
-        for role in ROLE_DESCRIPTIONS:
-            try:
-                existing = await svcs.embeddings.get_prototype(role)
-                if existing and existing.get("description_hash") == _description_hash(role):
-                    cached.append(role)
-                else:
-                    await ensure_prototype(role, svcs.embeddings, svcs.embeddings)
-                    computed.append(role)
-            except Exception as exc:
-                failed.append({"role": role, "error": str(exc)})
-
-        return json.dumps({
-            "computed": computed,
-            "cached": cached,
-            "failed": failed,
-            "total_roles": len(ROLE_DESCRIPTIONS),
-        })
 
     @mcp.tool()
     async def estimate_index(path: str) -> str:
@@ -72,73 +35,27 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         return json.dumps(estimate_project(path))
 
     @mcp.tool()
-    async def index_project(path: str, project_id: str = "", branch: str = "") -> str:
-        """
-        Full index of a project directory. Builds the call graph, embeds all
-        functions, and stores everything in Postgres + pgvector. Run once on
-        initial setup; use index_changes for in-session updates.
-
-        The path must be accessible on the Scopenos server's filesystem. If
-        your project is on a different machine than the server, use
-        index_project_files instead (sends file contents directly).
-
-        project_id: slug to identify this project (e.g. "myapp"). If omitted,
-        derived from the last path component.
-        branch: git branch name to record. If omitted, auto-detected from the
-        repo at path. Use this to index multiple branches of the same repo as
-        separate project_ids (e.g. project_id="myapp/feature-x", branch="feature-x").
-        """
-        svcs = await _tools_shared.get_services()
-        pid = project_id or Path(path).name or "default"
-        user = get_current_user()
-        if user and not await svcs.db.has_any_owner(pid):
-            await svcs.db.grant_project_access(user["id"], pid, "owner")
-        await check_permission(user, pid, "write", svcs.db)
-        user_id = user["id"] if user else "anon"
-        try:
-            job = check_and_enqueue(user_id, run_index_project, path, pid, job_timeout=3600, db_url=svcs.db._dsn)
-        except RuntimeError:
-            return json.dumps({"status": "rate_limited"})
-        import os
-        hook_path = Path(path) / ".git" / "hooks" / "post-commit"
-        hook_installed = hook_path.exists() and os.access(hook_path, os.X_OK)
-        response: dict = {"job_id": job.id, "status": "queued"}
-        if not hook_installed:
-            response["hook_missing"] = True
-            response["hook_warning"] = (
-                "No executable post-commit hook found at .git/hooks/post-commit. "
-                "Contract violations from direct git commits will not be detected. "
-                "Install with: cp /path/to/scopenos/scripts/post-commit.sh "
-                ".git/hooks/post-commit && chmod +x .git/hooks/post-commit"
-            )
-        return json.dumps(response)
-
-    @mcp.tool()
-    async def index_project_files(
+    async def index_project(
         files: dict[str, str],
         project_id: str,
         project_root: str = "",
+        branch: str = "",
+        head_commit: str = "",
     ) -> str:
         """
-        Index a project by sending file contents directly from the client.
+        Index a project by sending file contents from the client.
 
-        Use this when the project is on a DIFFERENT machine than the Scopenos
-        server (e.g. Claude Code running locally, server running on TheHive).
-        The client reads the files and passes their contents here — no server
-        filesystem access required.
+        files: dict of {path: file_content} for every source file to index.
+               Call in batches of ~100 files for large projects — repeated calls
+               accumulate into the same index.
+        project_id: stable slug for this project (e.g. "myapp"). Use the same
+                    value on every call.
+        project_root: local root path used only for deriving module names
+                      (e.g. "/workspace/myapp"). Does not need to exist on the server.
+        branch: current git branch. Run `git rev-parse --abbrev-ref HEAD` on the client.
+        head_commit: current HEAD SHA. Run `git rev-parse HEAD` on the client.
 
-        files: dict of {relative_or_absolute_path: file_content} for every
-               source file to index. Pass all .py (or other language) files
-               in the project.
-        project_id: slug to identify this project (must be consistent across
-                    calls — use the same value as you would for index_project).
-        project_root: the local root path, used only for deriving module names
-                      (e.g. "/workspace/myapp"). Does not need to exist on
-                      the server.
-
-        For large projects, call this in batches of ~100 files. The index
-        accumulates across calls — repeated calls update changed files and
-        add new ones. Call index_changes for subsequent per-session updates.
+        Use index_changes for subsequent per-session updates after the initial index.
         """
         svcs = await _tools_shared.get_services()
         user = get_current_user()
@@ -148,10 +65,12 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         result = await svcs.indexer.index_changes(
             list(files.keys()), files,
             project_root=project_root, project_id=project_id,
+            branch=branch, head_commit=head_commit,
         )
         written_ids = result.pop("function_ids", [])
         if written_ids:
-            violations = await svcs.contracts.check_functions(project_id, written_ids)
+            pdb = await _tools_shared.resolve_project_db(project_id, svcs.db)
+            violations = await svcs.contracts.check_functions(project_id, written_ids, pdb=pdb)
             result["contract_violations"] = violations
         else:
             result["contract_violations"] = []
@@ -163,6 +82,8 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         file_contents: dict[str, str],
         project_root: str = "",
         project_id: str = "",
+        branch: str = "",
+        head_commit: str = "",
     ) -> str:
         """
         Incremental update for changed files. Pass the paths and current contents
@@ -172,6 +93,8 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
 
         project_id: must match the value used in index_project. If omitted,
         derived from project_root's last component.
+        branch: current git branch. Run `git rev-parse --abbrev-ref HEAD` on the client.
+        head_commit: current HEAD SHA. Run `git rev-parse HEAD` on the client.
 
         Contract violations detected in the written functions are returned inline
         under "contract_violations". An empty list means no active contracts fired.
@@ -182,11 +105,13 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         pid = project_id or (_derive_project_id(project_root) if project_root else "default")
         await check_permission(get_current_user(), pid, "write", svcs.db)
         result = await svcs.indexer.index_changes(
-            file_paths, file_contents, project_root=project_root, project_id=project_id
+            file_paths, file_contents, project_root=project_root, project_id=project_id,
+            branch=branch, head_commit=head_commit,
         )
         written_ids = result.pop("function_ids", [])
         if written_ids:
-            violations = await svcs.contracts.check_functions(pid, written_ids)
+            pdb = await _tools_shared.resolve_project_db(pid, svcs.db)
+            violations = await svcs.contracts.check_functions(pid, written_ids, pdb=pdb)
             result["contract_violations"] = violations
         else:
             result["contract_violations"] = []
@@ -249,50 +174,6 @@ def register(mcp: FastMCP, _unused_get_services: Callable = None) -> tuple:
         except RuntimeError:
             return json.dumps({"status": "rate_limited"})
         return json.dumps({"job_id": job.id, "status": "queued"})
-
-    @mcp.tool()
-    async def index_lsif(path: str, project_id: str = "") -> str:
-        """
-        Ingest a pre-built LSIF (Language Server Index Format) index file into Scopenos.
-
-        LSIF files are produced by CI/CD indexers like lsif-py, lsif-tsc, lsif-java,
-        rust-analyzer, and others. They provide symbol definitions with hover
-        documentation and cross-reference data for any language without needing a
-        live tree-sitter parser.
-
-        path: absolute path to the .lsif NDJSON file on the Scopenos server filesystem.
-        project_id: namespace for the indexed symbols (defaults to the lsif filename stem).
-
-        Use this when:
-        - Indexing a language not yet supported by tree-sitter
-        - Ingesting multi-repo or monorepo indexes built in CI
-        - Bootstrapping a project from an existing Sourcegraph or GitHub index export
-        """
-        svcs = await _tools_shared.get_services()
-        await check_permission(get_current_user(), project_id or "default", "write", svcs.db)
-        result = await svcs.indexer.index_lsif(path, project_id=project_id)
-        return json.dumps(result)
-
-    @mcp.tool()
-    async def index_scip(path: str, project_id: str = "") -> str:
-        """
-        Ingest a pre-built SCIP (Sourcegraph Code Intelligence Protocol) JSON index
-        into Scopenos.
-
-        SCIP is the successor to LSIF — produced by scip-python, scip-typescript,
-        scip-java, rust-analyzer, and others. The JSON form is accepted here (produced
-        by `scip convert --to json` or directly by some indexers).
-
-        SCIP provides explicit symbol documentation and relationship data, yielding
-        both FunctionNode records and call edges from the relationships section.
-
-        path: absolute path to the .scip.json file on the Scopenos server filesystem.
-        project_id: namespace for the indexed symbols (defaults to the filename stem).
-        """
-        svcs = await _tools_shared.get_services()
-        await check_permission(get_current_user(), project_id or "default", "write", svcs.db)
-        result = await svcs.indexer.index_scip(path, project_id=project_id)
-        return json.dumps(result)
 
     @mcp.tool()
     async def index_schema_objects(project_id: str, include_db_tables: bool = False) -> str:

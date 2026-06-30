@@ -92,14 +92,7 @@ def register_routes(
                         )
                     user = existing
 
-                # Associate user with this org
-                async with control_db._db.execute(
-                    "UPDATE users SET org_id = ? WHERE id = ?",
-                    (org_slug, user["id"]),
-                ):
-                    pass
-
-                raw_key = await control_db.create_api_key(user["id"], name="signup")
+                raw_key = await control_db.create_api_key(user["id"], name="signup", org_id=org_slug)
             finally:
                 await control_db.close()
 

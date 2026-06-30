@@ -70,53 +70,6 @@ def test_get_queue_returns_rq_queue(monkeypatch):
     assert isinstance(q, Queue)
 
 
-# ── index_project dispatch ────────────────────────────────────────────────────
-
-@_redis_mark
-@_redis_mark
-@pytest.mark.asyncio
-async def test_index_project_returns_job_id(db, redis_conn, monkeypatch):
-    """index_project should enqueue a job and return job_id immediately."""
-    set_auth_db(db)
-    monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
-
-    # Insert user first (FK constraint), then project access
-    await db._db.execute(
-        "INSERT INTO users (id, email, plan, created_at) VALUES (?, ?, ?, ?)",
-        ("u1", "alice@example.com", "paid", "2026-01-01T00:00:00"),
-    )
-    await db._db.execute(
-        "INSERT INTO project_access (user_id, project_id, role) VALUES (?, ?, ?)",
-        ("u1", "myrepo", "owner"),
-    )
-
-    from src.server import _get_services, Services
-    from src.dependency_fingerprint import DependencyChecker
-    from src import queue as queue_mod
-
-    fake_queue = Queue(TEST_QUEUE_NAME, connection=redis_conn)
-
-    with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
-         patch("src.server._get_services", new=AsyncMock(return_value=Services(
-             db=db,
-             embeddings=MagicMock(),
-             pipeline=MagicMock(),
-             decisions=MagicMock(),
-             indexer=MagicMock(),
-             contracts=MagicMock(),
-             checker=DependencyChecker(),
-         ))), \
-         patch("src.tools.indexing.get_current_user", return_value={"id": "u1", "email": "alice@example.com"}):
-
-        from src.server import index_project
-        result_json = await index_project("/some/path", "myrepo")
-        result = json.loads(result_json)
-
-    assert "job_id" in result
-    assert result["status"] == "queued"
-    assert fake_queue.count == 1
-
-
 # ── GET /api/jobs/{job_id} ────────────────────────────────────────────────────
 
 @_redis_mark
@@ -194,53 +147,9 @@ async def test_jobs_endpoint_returns_404_for_unknown_job(db, monkeypatch):
     fake_redis.close()
 
 
-# ── Per-user rate limiting ────────────────────────────────────────────────────
-
-@_redis_mark
-@_redis_mark
-@pytest.mark.asyncio
-async def test_index_job_rejected_when_queue_depth_limit_reached(db, redis_conn, monkeypatch):
-    """Jobs beyond _USER_QUEUE_DEPTH_LIMIT are rejected; jobs under the limit are accepted."""
-    set_auth_db(db)
-    monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
-
-    await db._db.execute(
-        "INSERT INTO users (id, email, plan, created_at) VALUES (?, ?, ?, ?)",
-        ("u2", "bob@example.com", "paid", "2026-01-01T00:00:00"),
-    )
-    await db._db.execute(
-        "INSERT INTO project_access (user_id, project_id, role) VALUES (?, ?, ?)",
-        ("u2", "repo-a", "owner"),
-    )
-
-    from src.server import Services, _USER_QUEUE_DEPTH_LIMIT
-    from src.dependency_fingerprint import DependencyChecker
-    from src import queue as queue_mod
-
-    fake_queue = Queue(TEST_QUEUE_NAME, connection=redis_conn)
-
-    fake_svcs = Services(
-        db=db, embeddings=MagicMock(), pipeline=MagicMock(),
-        decisions=MagicMock(), indexer=MagicMock(),
-        contracts=MagicMock(), checker=DependencyChecker(),
-    )
-
-    with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
-         patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.tools.indexing.get_current_user", return_value={"id": "u2", "email": "bob@example.com"}):
-
-        from src.server import index_project
-
-        # Fill up to the limit — all should be accepted.
-        results = []
-        for _ in range(_USER_QUEUE_DEPTH_LIMIT):
-            results.append(json.loads(await index_project("/some/path", "repo-a")))
-
-        # One more should be rejected.
-        over_limit = json.loads(await index_project("/some/path", "repo-a"))
-
-    assert all(r["status"] == "queued" for r in results)
-    assert over_limit["status"] == "rate_limited"
+# ── Per-user rate limiting (enrich_summaries / reembed_project) ───────────────
+# index_project is now synchronous so rate limiting only applies to
+# background-job tools: enrich_summaries and reembed_project.
 
 
 @_redis_mark
@@ -324,49 +233,3 @@ async def test_index_changes_runs_synchronously(db, monkeypatch):
     assert "job_id" not in result
 
 
-@_redis_mark
-@_redis_mark
-@pytest.mark.asyncio
-async def test_rate_limit_is_per_user_not_global(db, redis_conn, monkeypatch):
-    """User A's active indexing job must not block user B."""
-    set_auth_db(db)
-    monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
-
-    for uid, email in [("u5", "eve@example.com"), ("u6", "frank@example.com")]:
-        await db._db.execute(
-            "INSERT INTO users (id, email, plan, created_at) VALUES (?, ?, ?, ?)",
-            (uid, email, "paid", "2026-01-01T00:00:00"),
-        )
-        await db._db.execute(
-            "INSERT INTO project_access (user_id, project_id, role) VALUES (?, ?, ?)",
-            (uid, f"repo-{uid}", "owner"),
-        )
-
-    from src.server import Services
-    from src.dependency_fingerprint import DependencyChecker
-    from src import queue as queue_mod
-
-    fake_queue = Queue(TEST_QUEUE_NAME, connection=redis_conn)
-    fake_svcs = Services(
-        db=db, embeddings=MagicMock(), pipeline=MagicMock(),
-        decisions=MagicMock(), indexer=MagicMock(),
-        contracts=MagicMock(), checker=DependencyChecker(),
-    )
-
-    from src.server import index_project
-
-    # User A starts an indexing job
-    with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
-         patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.tools.indexing.get_current_user", return_value={"id": "u5", "email": "eve@example.com"}):
-        result_a = json.loads(await index_project("/path/a", "repo-u5"))
-
-    assert result_a["status"] == "queued"
-
-    # User B should still be able to start their own job
-    with patch.object(queue_mod, "get_queue", return_value=fake_queue), \
-         patch("src.server._get_services", new=AsyncMock(return_value=fake_svcs)), \
-         patch("src.tools.indexing.get_current_user", return_value={"id": "u6", "email": "frank@example.com"}):
-        result_b = json.loads(await index_project("/path/b", "repo-u6"))
-
-    assert result_b["status"] == "queued"  # NOT rate_limited
