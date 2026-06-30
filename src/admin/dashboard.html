@@ -44,7 +44,7 @@
   .card .value.ok     { color: #68d391; }
 
   /* ── Tables ── */
-  .table-wrap { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 10px; overflow: hidden; }
+  .table-wrap { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 10px; overflow-x: auto; overflow-y: hidden; }
   .table-toolbar { padding: 12px 18px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #2d3148; flex-wrap: wrap; }
   .table-toolbar h2 { font-size: 14px; font-weight: 600; color: #e2e8f0; }
   .toolbar-spacer { flex: 1; }
@@ -74,7 +74,7 @@
   /* ── Modal ── */
   #key-modal { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(3px); }
   #key-modal.hidden { display: none; }
-  .modal-box { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 14px; padding: 32px; width: 440px; box-shadow: 0 24px 48px rgba(0,0,0,.5); }
+  .modal-box { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 14px; padding: 32px; width: 440px; max-width: calc(100vw - 32px); box-shadow: 0 24px 48px rgba(0,0,0,.5); }
   .modal-box .modal-icon { font-size: 28px; margin-bottom: 14px; }
   .modal-box h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
   .modal-box p { color: #718096; font-size: 13px; margin-bottom: 20px; line-height: 1.6; }
@@ -88,6 +88,34 @@
   /* ── Tabs ── */
   .tab { display: none; }
   .tab.active { display: block; }
+
+  /* ── Mobile ── */
+  @media (max-width: 640px) {
+    header { flex-wrap: wrap; padding: 10px 14px; gap: 8px; }
+    header .subtitle { display: none; }
+    #refresh-meta { display: none; }
+    #refresh-btn { min-width: unset; padding: 6px 10px; }
+    #key-badge { margin-left: auto; }
+
+    nav { overflow-x: auto; scrollbar-width: none; padding: 0 14px; }
+    nav::-webkit-scrollbar { display: none; }
+    nav button { padding: 10px 12px; font-size: 12px; white-space: nowrap; }
+
+    main { padding: 16px 12px; }
+
+    .cards { grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; }
+    .card { padding: 16px; }
+    .card .value { font-size: 22px; }
+    .card .label { font-size: 10px; }
+
+    .table-toolbar { padding: 10px 14px; gap: 8px; }
+    .table-toolbar h2 { flex: 1 0 100%; }
+    .toolbar-spacer { display: none; }
+    .search-input { width: 100%; min-width: 0; }
+    .count-badge { order: -1; }
+
+    td, th { padding: 9px 12px; }
+  }
 </style>
 </head>
 <body>
