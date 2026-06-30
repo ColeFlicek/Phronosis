@@ -74,6 +74,8 @@ async def _get_services() -> Services:
     the initial lifespan startup call (which pre-warms the default services).
     """
     user = get_current_user()
+    if user and user.get("is_admin"):
+        raise HTTPException(403, "Admin keys cannot access project tools. Use an org-scoped key for MCP tools.")
     org_id: str | None = user.get("org_id") if user else None
 
     if org_id in _services_cache:
@@ -153,6 +155,7 @@ register_routes(mcp, _get_services, email_sender=get_email_sender())
 # ── Tool registrations ─────────────────────────────────────────────────────────
 
 from .tools import discovery, indexing, graph, memory, contracts, quality, dependencies
+from .admin import routes as admin_routes
 
 discovery.register(mcp, _get_services)
 index_project, index_changes, enrich_summaries = indexing.register(mcp, _get_services)
@@ -161,6 +164,7 @@ memory.register(mcp, _get_services)
 contracts.register(mcp, _get_services)
 quality.register(mcp, _get_services)
 dependencies.register(mcp, _get_services)
+admin_routes.register(mcp)
 
 # Re-exports for backward-compat with tests (symbols moved to src/tools/ during refactor)
 from src import queue as _queue_mod  # noqa: E402

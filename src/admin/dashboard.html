@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scopenos Admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+  a { color: #63b3ed; }
+
+  /* ── Layout ── */
+  header { background: #1a1d2e; border-bottom: 1px solid #2d3148; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+  header .subtitle { color: #4a5568; font-size: 12px; font-family: monospace; }
+  #refresh-btn { margin-left: auto; background: #2d3748; border: 1px solid #4a5568; color: #e2e8f0; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px; min-width: 100px; justify-content: center; }
+  #refresh-btn:hover:not(:disabled) { background: #3d4a5e; }
+  #refresh-btn:disabled { opacity: .5; cursor: default; }
+  #refresh-btn .spin { display: inline-block; }
+  #refresh-btn.loading .spin { animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #key-badge { font-size: 11px; font-family: monospace; background: #2d3748; padding: 3px 8px; border-radius: 4px; color: #a0aec0; cursor: pointer; white-space: nowrap; }
+  #key-badge:hover { background: #3d4a5e; }
+  #refresh-meta { font-size: 11px; color: #4a5568; white-space: nowrap; }
+
+  nav { background: #1a1d2e; border-bottom: 1px solid #2d3148; padding: 0 24px; display: flex; gap: 2px; }
+  nav button { background: none; border: none; color: #718096; padding: 12px 16px; cursor: pointer; font-size: 13px; font-weight: 500; border-bottom: 2px solid transparent; transition: color .15s; }
+  nav button:hover { color: #e2e8f0; }
+  nav button.active { color: #63b3ed; border-bottom-color: #63b3ed; }
+
+  main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+  /* ── Cards ── */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .card { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 10px; padding: 20px; border-top: 3px solid #2d3148; }
+  .card.accent-green { border-top-color: #38a169; }
+  .card.accent-red   { border-top-color: #e53e3e; }
+  .card.accent-blue  { border-top-color: #3182ce; }
+  .card.accent-muted { border-top-color: #4a5568; }
+  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #718096; margin-bottom: 8px; }
+  .card .value { font-size: 28px; font-weight: 700; color: #fff; }
+  .card .value.warn   { color: #f6ad55; }
+  .card .value.danger { color: #fc8181; }
+  .card .value.ok     { color: #68d391; }
+
+  /* ── Tables ── */
+  .table-wrap { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 10px; overflow: hidden; }
+  .table-toolbar { padding: 12px 18px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #2d3148; flex-wrap: wrap; }
+  .table-toolbar h2 { font-size: 14px; font-weight: 600; color: #e2e8f0; }
+  .toolbar-spacer { flex: 1; }
+  .table-meta { font-size: 11px; color: #4a5568; white-space: nowrap; }
+  .search-input { background: #0f1117; border: 1px solid #2d3148; border-radius: 6px; color: #e2e8f0; padding: 5px 10px; font-size: 13px; width: 210px; }
+  .search-input:focus { outline: none; border-color: #4a5568; }
+  .count-badge { font-size: 12px; color: #718096; white-space: nowrap; }
+  .toolbar-select { background: #0f1117; border: 1px solid #2d3148; color: #e2e8f0; padding: 5px 8px; border-radius: 6px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #718096; padding: 10px 16px; border-bottom: 1px solid #2d3148; white-space: nowrap; cursor: pointer; user-select: none; }
+  th:hover { color: #a0aec0; }
+  th .sort-arrow { margin-left: 4px; opacity: .35; font-size: 10px; }
+  th.sorted .sort-arrow { opacity: 1; color: #63b3ed; }
+  td { padding: 11px 16px; border-bottom: 1px solid #1e2235; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.025); }
+  .mono { font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace; font-size: 12px; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; letter-spacing: .02em; }
+  .badge-ok     { background: #1a3a2a; color: #68d391; }
+  .badge-warn   { background: #3a2a1a; color: #f6ad55; }
+  .badge-danger { background: #3a1a1a; color: #fc8181; }
+  .badge-muted  { background: #2d3148; color: #718096; }
+  .badge-admin  { background: #1a2a3a; color: #63b3ed; }
+  .empty { text-align: center; color: #718096; padding: 40px; font-size: 13px; }
+  .hint { font-size: 11px; color: #4a5568; margin-top: 4px; }
+
+  /* ── Modal ── */
+  #key-modal { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(3px); }
+  #key-modal.hidden { display: none; }
+  .modal-box { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 14px; padding: 32px; width: 440px; box-shadow: 0 24px 48px rgba(0,0,0,.5); }
+  .modal-box .modal-icon { font-size: 28px; margin-bottom: 14px; }
+  .modal-box h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+  .modal-box p { color: #718096; font-size: 13px; margin-bottom: 20px; line-height: 1.6; }
+  .modal-box label { font-size: 12px; font-weight: 600; color: #a0aec0; display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .05em; }
+  .modal-box input { width: 100%; background: #0f1117; border: 1px solid #4a5568; border-radius: 8px; color: #e2e8f0; padding: 11px 14px; font-size: 14px; font-family: monospace; }
+  .modal-box input:focus { outline: none; border-color: #63b3ed; box-shadow: 0 0 0 2px rgba(99,179,237,.15); }
+  .modal-box button { margin-top: 16px; width: 100%; background: #3182ce; border: none; color: #fff; padding: 11px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
+  .modal-box button:hover { background: #2b6cb0; }
+  .modal-error { color: #fc8181; font-size: 12px; margin-top: 10px; min-height: 16px; }
+
+  /* ── Tabs ── */
+  .tab { display: none; }
+  .tab.active { display: block; }
+</style>
+</head>
+<body>
+
+<div id="key-modal">
+  <div class="modal-box">
+    <div class="modal-icon">🔑</div>
+    <h2>Admin Key Required</h2>
+    <p>Enter your admin API key to access the control-plane dashboard. The key is stored only in this browser tab's session memory — it's never persisted to disk or sent anywhere except back to this Scopenos server.</p>
+    <label for="key-input">Admin API Key</label>
+    <input type="password" id="key-input" placeholder="paste key here…" autocomplete="off" />
+    <div class="modal-error" id="modal-error"></div>
+    <button id="connect-btn" onclick="submitKey()">Connect</button>
+  </div>
+</div>
+
+<header>
+  <h1>Scopenos Admin</h1>
+  <span class="subtitle" id="server-url"></span>
+  <span id="key-badge" onclick="clearKey()" title="Click to change key">key: —</span>
+  <span id="refresh-meta"></span>
+  <button id="refresh-btn" onclick="refreshCurrent()"><span class="spin">↻</span> Refresh</button>
+</header>
+
+<nav>
+  <button class="active" data-tab="summary"  onclick="showTab('summary')">Summary</button>
+  <button            data-tab="keys"     onclick="showTab('keys')">Keys</button>
+  <button            data-tab="orgs"     onclick="showTab('orgs')">Orgs</button>
+  <button            data-tab="projects" onclick="showTab('projects')">Projects</button>
+  <button            data-tab="auth-log" onclick="showTab('auth-log')">Auth Log</button>
+</nav>
+
+<main>
+
+<!-- Summary -->
+<div id="tab-summary" class="tab active">
+  <div class="cards">
+    <div class="card accent-green"><div class="label">Active Keys</div><div class="value" id="s-active-keys">—</div></div>
+    <div class="card accent-muted"><div class="label">Revoked Keys</div><div class="value" id="s-revoked-keys">—</div></div>
+    <div class="card accent-blue"> <div class="label">Orgs</div><div class="value" id="s-orgs">—</div></div>
+    <div class="card accent-blue"> <div class="label">Users</div><div class="value" id="s-users">—</div></div>
+    <div class="card accent-red">  <div class="label">Auth Failures (1h)</div><div class="value" id="s-failures">—</div></div>
+  </div>
+  <div class="table-wrap">
+    <div class="table-toolbar">
+      <h2>Recent Auth Failures</h2>
+      <span class="table-meta" id="summary-meta"></span>
+    </div>
+    <div id="summary-failures"></div>
+  </div>
+</div>
+
+<!-- Keys -->
+<div id="tab-keys" class="tab">
+  <div class="table-wrap">
+    <div class="table-toolbar">
+      <h2>API Keys</h2>
+      <div class="toolbar-spacer"></div>
+      <input class="search-input" id="keys-search" placeholder="Filter by name, email, prefix…" oninput="filterTable('keys-table','keys-count',this.value)">
+      <span class="count-badge" id="keys-count"></span>
+      <span class="table-meta" id="keys-meta"></span>
+    </div>
+    <table id="keys-table">
+      <thead><tr>
+        <th onclick="sortTable('keys-table',0)">Prefix <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',1)">Name <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',2)">Owner <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',3)">Org <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',4)">Scope <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',5)">Created <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',6)">Last Used <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('keys-table',7)">Status <span class="sort-arrow">↕</span></th>
+      </tr></thead>
+      <tbody id="keys-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Orgs -->
+<div id="tab-orgs" class="tab">
+  <div class="table-wrap">
+    <div class="table-toolbar">
+      <h2>Organizations</h2>
+      <div class="toolbar-spacer"></div>
+      <input class="search-input" id="orgs-search" placeholder="Filter by slug, plan…" oninput="filterTable('orgs-table','orgs-count',this.value)">
+      <span class="count-badge" id="orgs-count"></span>
+      <span class="table-meta" id="orgs-meta"></span>
+    </div>
+    <table id="orgs-table">
+      <thead><tr>
+        <th onclick="sortTable('orgs-table',0)">Slug <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('orgs-table',1)">Plan <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('orgs-table',2)">Members <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('orgs-table',3)">Created <span class="sort-arrow">↕</span></th>
+      </tr></thead>
+      <tbody id="orgs-body"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Projects -->
+<div id="tab-projects" class="tab">
+  <div class="table-wrap">
+    <div class="table-toolbar">
+      <h2>Projects</h2>
+      <span class="table-meta">active org connections only</span>
+      <div class="toolbar-spacer"></div>
+      <input class="search-input" id="projects-search" placeholder="Filter by id, org…" oninput="filterTable('projects-table','projects-count',this.value)">
+      <span class="count-badge" id="projects-count"></span>
+      <span class="table-meta" id="projects-meta"></span>
+    </div>
+    <table id="projects-table">
+      <thead><tr>
+        <th onclick="sortTable('projects-table',0)">Project ID <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('projects-table',1)">Org <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('projects-table',2)">Schema <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('projects-table',3)">Functions <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('projects-table',4)">Last Indexed <span class="sort-arrow">↕</span></th>
+      </tr></thead>
+      <tbody id="projects-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Auth Log -->
+<div id="tab-auth-log" class="tab">
+  <div class="table-wrap">
+    <div class="table-toolbar">
+      <h2>Auth Log</h2>
+      <div class="toolbar-spacer"></div>
+      <input class="search-input" id="log-search" placeholder="Filter by prefix, outcome, endpoint…" oninput="filterTable('log-table','log-count',this.value)">
+      <select id="log-limit" class="toolbar-select" onchange="loadAuthLog()">
+        <option value="200">Last 200</option>
+        <option value="1000">Last 1000</option>
+        <option value="5000">Last 5000</option>
+      </select>
+      <span class="count-badge" id="log-count"></span>
+      <span class="table-meta" id="log-meta"></span>
+    </div>
+    <table id="log-table">
+      <thead><tr>
+        <th onclick="sortTable('log-table',0)">Time <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('log-table',1)">Key Prefix <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('log-table',2)">Outcome <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('log-table',3)">Endpoint <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable('log-table',4)">Project <span class="sort-arrow">↕</span></th>
+      </tr></thead>
+      <tbody id="log-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+</main>
+
+<script>
+const BASE = window.location.origin;
+let adminKey = sessionStorage.getItem('scopenos_admin_key') || '';
+let currentTab = 'summary';
+let refreshIntervalId = null;
+let lastRefreshed = null;
+
+document.getElementById('server-url').textContent = BASE;
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function apiFetch(path, opts = {}) {
+  const r = await fetch(BASE + path, {
+    ...opts,
+    headers: { 'X-API-Key': adminKey, 'Content-Type': 'application/json', ...(opts.headers || {}) }
+  });
+  if (r.status === 401 || r.status === 403) {
+    // Key no longer valid — re-prompt without clearing sessionStorage
+    // (403 could mean admin flag removed, 401 means key gone entirely)
+    const msg = r.status === 403 ? 'Key is no longer an admin key.' : 'Session expired or key revoked.';
+    showKeyModal(msg);
+    throw new Error(`HTTP ${r.status}`);
+  }
+  return r;
+}
+
+// ── Key modal ─────────────────────────────────────────────────────────────────
+function showKeyModal(prefillError = '') {
+  const modal = document.getElementById('key-modal');
+  modal.classList.remove('hidden');
+  document.getElementById('modal-error').textContent = prefillError;
+  document.getElementById('key-input').value = '';
+  setTimeout(() => document.getElementById('key-input').focus(), 50);
+}
+
+async function submitKey() {
+  const btn = document.getElementById('connect-btn');
+  const input = document.getElementById('key-input').value.trim();
+  const errEl = document.getElementById('modal-error');
+  errEl.textContent = '';
+  if (!input) { errEl.textContent = 'Key cannot be empty.'; return; }
+  btn.disabled = true; btn.textContent = 'Connecting…';
+  try {
+    const r = await fetch(BASE + '/admin/api/summary', { headers: { 'X-API-Key': input } });
+    if (r.status === 401) { errEl.textContent = 'Key not recognised.'; return; }
+    if (r.status === 403) { errEl.textContent = 'Key exists but is not an admin key (is_admin=FALSE).'; return; }
+    if (!r.ok) { errEl.textContent = `Server error: ${r.status}`; return; }
+    adminKey = input;
+    sessionStorage.setItem('scopenos_admin_key', adminKey);
+    document.getElementById('key-modal').classList.add('hidden');
+    updateKeyBadge();
+    loadSummary();
+  } catch(e) {
+    errEl.textContent = `Connection failed: ${e.message}`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Connect';
+  }
+}
+
+document.getElementById('key-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitKey();
+});
+
+function clearKey() {
+  sessionStorage.removeItem('scopenos_admin_key');
+  adminKey = '';
+  showKeyModal();
+}
+
+function updateKeyBadge() {
+  const badge = document.getElementById('key-badge');
+  badge.textContent = adminKey ? `key: ···${adminKey.slice(-6)}` : 'key: —';
+  badge.title = adminKey ? 'Click to change key' : 'No key set';
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function showTab(name) {
+  currentTab = name;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.getElementById('tab-' + name).classList.add('active');
+  refreshTab(name);
+}
+
+function refreshCurrent() { refreshTab(currentTab); }
+
+function refreshTab(name) {
+  if (name === 'summary')  loadSummary();
+  else if (name === 'keys')     loadKeys();
+  else if (name === 'orgs')     loadOrgs();
+  else if (name === 'projects') loadProjects();
+  else if (name === 'auth-log') loadAuthLog();
+}
+
+// ── Refresh UI state ──────────────────────────────────────────────────────────
+function setLoading(on) {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.toggle('loading', on);
+  btn.disabled = on;
+}
+
+function stampRefresh() {
+  lastRefreshed = Date.now();
+  document.getElementById('refresh-meta').textContent = 'updated just now';
+}
+
+function tickRefreshMeta() {
+  if (!lastRefreshed) return;
+  const secs = Math.round((Date.now() - lastRefreshed) / 1000);
+  const el = document.getElementById('refresh-meta');
+  if (secs < 5)   el.textContent = 'updated just now';
+  else if (secs < 60) el.textContent = `updated ${secs}s ago`;
+  else el.textContent = `updated ${Math.round(secs/60)}m ago`;
+}
+
+// ── Summary ───────────────────────────────────────────────────────────────────
+async function loadSummary() {
+  setLoading(true);
+  try {
+    const r = await apiFetch('/admin/api/summary');
+    if (!r.ok) return;
+    const d = await r.json();
+
+    const set = (id, val, cls) => {
+      const el = document.getElementById(id);
+      el.textContent = val;
+      el.className = 'value' + (cls ? ' ' + cls : '');
+    };
+    set('s-active-keys',  d.active_keys,              d.active_keys === 0 ? 'warn' : '');
+    set('s-revoked-keys', d.revoked_keys);
+    set('s-orgs',         d.orgs);
+    set('s-users',        d.users);
+    set('s-failures',     d.auth_failures_last_hour,  d.auth_failures_last_hour > 0 ? 'danger' : 'ok');
+
+    // Update card accent based on failure count
+    document.querySelector('.card.accent-red .value').parentElement.classList.toggle(
+      'accent-red', d.auth_failures_last_hour > 0
+    );
+
+    // Recent failures mini-table
+    const lr = await apiFetch('/admin/api/auth-log?limit=50');
+    if (lr.ok) {
+      const ld = await lr.json();
+      const failures = (ld.events || []).filter(e => e.outcome !== 'ok').slice(0, 15);
+      const meta = document.getElementById('summary-meta');
+      meta.textContent = failures.length ? `${failures.length} shown` : '';
+      const el = document.getElementById('summary-failures');
+      if (failures.length === 0) {
+        el.innerHTML = '<div class="empty">No recent auth failures ✓</div>';
+      } else {
+        el.innerHTML = `<table style="width:100%">
+          <thead><tr><th>Time</th><th>Key Prefix</th><th>Outcome</th><th>Endpoint</th></tr></thead>
+          <tbody>${failures.map(e => `<tr>
+            <td class="mono" style="color:#a0aec0">${fmtTime(e.created_at)}</td>
+            <td class="mono">${e.key_prefix || '<span style="color:#4a5568">—</span>'}</td>
+            <td>${outcomeBadge(e.outcome)}</td>
+            <td class="mono" style="color:#a0aec0;font-size:12px">${esc(e.endpoint || '')}</td>
+          </tr>`).join('')}</tbody>
+        </table>`;
+      }
+    }
+    stampRefresh();
+  } catch(e) {
+    if (!e.message.startsWith('HTTP')) console.error('summary error', e);
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ── Keys ──────────────────────────────────────────────────────────────────────
+async function loadKeys() {
+  const tbody = document.getElementById('keys-body');
+  setLoading(true);
+  try {
+    const r = await apiFetch('/admin/api/keys');
+    if (!r.ok) { tbody.innerHTML = `<tr><td colspan="8" class="empty">Error ${r.status}</td></tr>`; return; }
+    const d = await r.json();
+    const keys = d.keys || [];
+    setCount('keys-count', keys.length, keys.length, 'key');
+    if (!keys.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No keys found</td></tr>'; return; }
+    tbody.innerHTML = keys.map(k => `<tr>
+      <td class="mono">${esc(k.key_prefix || '')}</td>
+      <td>${esc(k.name)}</td>
+      <td style="color:#a0aec0">${esc(k.user_email)}</td>
+      <td class="mono" style="color:#718096;font-size:12px">${esc(k.org_id || '—')}</td>
+      <td>${k.is_admin ? '<span class="badge badge-admin">admin</span>' : '<span class="badge badge-muted">org</span>'}</td>
+      <td class="mono" style="color:#a0aec0">${fmtDate(k.created_at)}</td>
+      <td class="mono" style="color:#a0aec0">${k.last_used ? fmtTime(k.last_used) : '<span style="color:#4a5568">never</span>'}</td>
+      <td>${k.revoked_at ? `<span class="badge badge-danger">revoked</span><div class="hint">${fmtDate(k.revoked_at)}</div>` : '<span class="badge badge-ok">active</span>'}</td>
+    </tr>`).join('');
+    stampRefresh();
+    document.getElementById('keys-meta').textContent = `updated ${fmtTime(new Date().toISOString())}`;
+    filterTable('keys-table', 'keys-count', document.getElementById('keys-search').value);
+  } catch(e) {
+    if (!e.message.startsWith('HTTP')) tbody.innerHTML = `<tr><td colspan="8" class="empty">Failed: ${esc(e.message)}</td></tr>`;
+  } finally { setLoading(false); }
+}
+
+// ── Orgs ──────────────────────────────────────────────────────────────────────
+async function loadOrgs() {
+  const tbody = document.getElementById('orgs-body');
+  setLoading(true);
+  try {
+    const r = await apiFetch('/admin/api/orgs');
+    if (!r.ok) { tbody.innerHTML = `<tr><td colspan="4" class="empty">Error ${r.status}</td></tr>`; return; }
+    const d = await r.json();
+    const orgs = d.orgs || [];
+    setCount('orgs-count', orgs.length, orgs.length, 'org');
+    if (!orgs.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">No orgs provisioned yet</td></tr>'; return; }
+    tbody.innerHTML = orgs.map(o => `<tr>
+      <td>
+        <strong>${esc(o.slug)}</strong>
+        <div class="mono hint">${esc(o.id)}</div>
+      </td>
+      <td><span class="badge badge-muted">${esc(o.plan)}</span></td>
+      <td>${o.member_count}</td>
+      <td class="mono" style="color:#a0aec0">${fmtDate(o.created_at)}</td>
+    </tr>`).join('');
+    stampRefresh();
+    filterTable('orgs-table', 'orgs-count', document.getElementById('orgs-search').value);
+  } catch(e) {
+    if (!e.message.startsWith('HTTP')) tbody.innerHTML = `<tr><td colspan="4" class="empty">Failed: ${esc(e.message)}</td></tr>`;
+  } finally { setLoading(false); }
+}
+
+// ── Projects ──────────────────────────────────────────────────────────────────
+async function loadProjects() {
+  const tbody = document.getElementById('projects-body');
+  setLoading(true);
+  try {
+    const r = await apiFetch('/admin/api/projects');
+    if (!r.ok) { tbody.innerHTML = `<tr><td colspan="5" class="empty">Error ${r.status}</td></tr>`; return; }
+    const d = await r.json();
+    const projects = d.projects || [];
+    setCount('projects-count', projects.length, projects.length, 'project');
+    if (!projects.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${esc(d.note || 'No projects found.')}<div class="hint">Projects appear here once an org has made at least one authenticated request this server session.</div></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = projects.map(p => {
+      if (p.error) return `<tr>
+        <td class="mono" style="color:#fc8181">${esc(p.org_id)}</td>
+        <td colspan="4" style="color:#fc8181;font-size:12px">${esc(p.error)}</td>
+      </tr>`;
+      return `<tr>
+        <td><strong>${esc(p.id)}</strong></td>
+        <td class="mono" style="color:#a0aec0">${esc(p.org_id || '—')}</td>
+        <td class="mono" style="color:#718096;font-size:12px">${esc(p.schema_name || '—')}</td>
+        <td>${p.function_count ?? '—'}</td>
+        <td class="mono" style="color:#a0aec0">${p.last_indexed ? fmtTime(p.last_indexed) : '<span style="color:#4a5568">—</span>'}</td>
+      </tr>`;
+    }).join('');
+    stampRefresh();
+    filterTable('projects-table', 'projects-count', document.getElementById('projects-search').value);
+  } catch(e) {
+    if (!e.message.startsWith('HTTP')) tbody.innerHTML = `<tr><td colspan="5" class="empty">Failed: ${esc(e.message)}</td></tr>`;
+  } finally { setLoading(false); }
+}
+
+// ── Auth Log ──────────────────────────────────────────────────────────────────
+async function loadAuthLog() {
+  const tbody = document.getElementById('log-body');
+  const limit = document.getElementById('log-limit').value;
+  setLoading(true);
+  try {
+    const r = await apiFetch(`/admin/api/auth-log?limit=${limit}`);
+    if (!r.ok) { tbody.innerHTML = `<tr><td colspan="5" class="empty">Error ${r.status}</td></tr>`; return; }
+    const d = await r.json();
+    const events = d.events || [];
+    setCount('log-count', events.length, events.length, 'event');
+    if (!events.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No auth events logged yet</td></tr>'; return; }
+    tbody.innerHTML = events.map(e => `<tr>
+      <td class="mono" style="color:#a0aec0;font-size:12px">${fmtTime(e.created_at)}</td>
+      <td class="mono">${e.key_prefix ? `<span title="SHA-256 prefix">${esc(e.key_prefix)}</span>` : '<span style="color:#4a5568">—</span>'}</td>
+      <td>${outcomeBadge(e.outcome)}</td>
+      <td class="mono" style="color:#a0aec0;font-size:12px">${esc(e.endpoint || '')}</td>
+      <td class="mono" style="color:#718096">${esc(e.project_id || '')}</td>
+    </tr>`).join('');
+    stampRefresh();
+    filterTable('log-table', 'log-count', document.getElementById('log-search').value);
+  } catch(e) {
+    if (!e.message.startsWith('HTTP')) tbody.innerHTML = `<tr><td colspan="5" class="empty">Failed: ${esc(e.message)}</td></tr>`;
+  } finally { setLoading(false); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}); }
+  catch { return String(iso).slice(0, 10); }
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+  } catch { return String(iso).slice(0, 19).replace('T',' '); }
+}
+
+function outcomeBadge(outcome) {
+  const map = {
+    'ok':           '<span class="badge badge-ok">ok</span>',
+    'revoked':      '<span class="badge badge-warn">revoked</span>',
+    'unknown-key':  '<span class="badge badge-danger">unknown-key</span>',
+    'no-key-sent':  '<span class="badge badge-muted">no-key-sent</span>',
+  };
+  return map[outcome] || `<span class="badge badge-muted">${esc(outcome)}</span>`;
+}
+
+function setCount(badgeId, visible, total, noun) {
+  const el = document.getElementById(badgeId);
+  if (!el) return;
+  el.textContent = visible === total
+    ? `${total} ${noun}${total !== 1 ? 's' : ''}`
+    : `${visible} of ${total} ${noun}${total !== 1 ? 's' : ''}`;
+}
+
+function filterTable(tableId, countBadgeId, query) {
+  const q = (query || '').toLowerCase();
+  const rows = document.querySelectorAll(`#${tableId} tbody tr`);
+  let total = rows.length, visible = 0;
+  rows.forEach(row => {
+    const show = !q || row.textContent.toLowerCase().includes(q);
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  setCount(countBadgeId, visible, total, countBadgeId.replace('-count','').replace('log','event').replace('keys','key').replace('orgs','org').replace('projects','project'));
+}
+
+let sortState = {};
+function sortTable(tableId, colIdx) {
+  const key = `${tableId}-${colIdx}`;
+  sortState[key] = sortState[key] === 'asc' ? 'desc' : 'asc';
+  const asc = sortState[key] === 'asc';
+  const tbody = document.getElementById(tableId).querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const av = a.cells[colIdx]?.textContent.trim() || '';
+    const bv = b.cells[colIdx]?.textContent.trim() || '';
+    return asc
+      ? av.localeCompare(bv, undefined, {numeric:true, sensitivity:'base'})
+      : bv.localeCompare(av, undefined, {numeric:true, sensitivity:'base'});
+  });
+  rows.forEach(r => tbody.appendChild(r));
+  document.querySelectorAll(`#${tableId} th`).forEach((th, i) => {
+    th.classList.toggle('sorted', i === colIdx);
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = i === colIdx ? (asc ? '↑' : '↓') : '↕';
+  });
+}
+
+// ── Auto-refresh (30s) ────────────────────────────────────────────────────────
+refreshIntervalId = setInterval(() => {
+  refreshTab(currentTab);
+}, 30000);
+
+setInterval(tickRefreshMeta, 5000);
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+updateKeyBadge();
+if (adminKey) {
+  document.getElementById('key-modal').classList.add('hidden');
+  loadSummary();
+} else {
+  showKeyModal();
+}
+</script>
+</body>
+</html>

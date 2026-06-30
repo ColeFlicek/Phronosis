@@ -56,15 +56,28 @@ def get_current_org_db() -> CallGraphDB | None:
 
 
 def require_user() -> dict:
-    """Return the authenticated user or raise 401.
-
-    The user is set by AuthMiddleware before the handler is invoked — no DB
-    call here; it's free after the per-request lookup the middleware already did.
-    """
+    """Return the authenticated user or raise 401."""
     user = _current_user.get()
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
+
+
+def require_admin() -> dict:
+    """Return the authenticated user or raise 401/403. User must have is_admin=True."""
+    user = _current_user.get()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin key required")
+    return user
+
+
+def get_control_db() -> "CallGraphDB | None":
+    """Return the control-plane CallGraphDB if the router is initialized."""
+    if _org_router is None:
+        return None
+    return getattr(_org_router, "control_db", None)
 
 
 class AuthMiddleware:
@@ -83,10 +96,16 @@ class AuthMiddleware:
         if scope["type"] == "http":
             headers = {k: v for k, v in scope.get("headers", [])}
             raw_key = headers.get(b"x-api-key", b"").decode("utf-8", errors="replace")
+            endpoint = scope.get("path", "")
             user = None
             org_db = None
             if raw_key and _org_router is not None:
-                user, org_db = await _org_router.resolve_request(raw_key)
+                user, org_db = await _org_router.resolve_request(raw_key, endpoint=endpoint)
+            elif _org_router is not None and not raw_key:
+                import asyncio as _asyncio
+                _asyncio.create_task(
+                    _org_router.log_no_key_event(endpoint)
+                )
             token_user = _current_user.set(user)
             token_db = _current_org_db.set(org_db)
             try:

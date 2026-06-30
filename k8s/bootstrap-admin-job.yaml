@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scopenos-bootstrap-admin
+  namespace: scopenos
+  annotations:
+    # One-time job — apply once after initial deploy, delete after retrieving the key.
+    # Usage:
+    #   kubectl apply -f k8s/bootstrap-admin-job.yaml
+    #   kubectl logs -n scopenos job/scopenos-bootstrap-admin
+    #   kubectl delete -f k8s/bootstrap-admin-job.yaml
+spec:
+  ttlSecondsAfterFinished: 3600   # auto-delete 1h after completion
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: ghcr.io/coleflicek/scopenos:latest
+          command: ["python", "scripts/bootstrap_api_key.py", "--admin"]
+          envFrom:
+            - secretRef:
+                name: scopenos-secrets

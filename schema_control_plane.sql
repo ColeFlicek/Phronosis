@@ -73,12 +73,32 @@ CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(user_id);
 -- Revoke default public schema create privilege (defence in depth).
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
+-- ── Admin flag on API keys ─────────────────────────────────────────────────
+-- is_admin=TRUE keys bypass org routing and can access /admin/* endpoints.
+-- They cannot access project data (MCP tools will 403).
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ── Auth events ────────────────────────────────────────────────────────────
+-- Rolling log of auth resolution outcomes. Retained to last 5000 rows.
+-- key_prefix: first 8 chars of SHA-256 of the raw key (never the key itself).
+-- outcome: ok | unknown-key | revoked | no-key-sent
+CREATE TABLE IF NOT EXISTS auth_events (
+    id          TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    key_prefix  TEXT,
+    outcome     TEXT NOT NULL,
+    endpoint    TEXT,
+    project_id  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_events_created ON auth_events(created_at DESC);
+
 -- Grant table-level access to the app role (idempotent once role exists).
 DO $$
 BEGIN
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'scopenos_control_rw') THEN
         GRANT SELECT, INSERT, UPDATE, DELETE
-            ON organizations, users, api_keys, org_members
+            ON organizations, users, api_keys, org_members, auth_events
             TO scopenos_control_rw;
         GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO scopenos_control_rw;
     END IF;

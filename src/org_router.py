@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -45,20 +46,61 @@ class OrgRouter:
                 "Point it at the Scopenos control plane database."
             )
         control_db = await CallGraphDB.create(dsn, schema="scopenos", skip_schema_init=True)
-        return cls(control_db)
+        router = cls(control_db)
+        await router._apply_control_schema(dsn)
+        return router
 
-    async def resolve_request(self, raw_key: str) -> tuple[dict | None, "CallGraphDB"]:
+    async def _apply_control_schema(self, dsn: str) -> None:
+        """Apply schema_control_plane.sql at startup (idempotent — all IF NOT EXISTS)."""
+        import asyncpg
+        schema_path = Path(__file__).parent.parent / "schema_control_plane.sql"
+        if not schema_path.exists():
+            return
+        sql = schema_path.read_text()
+        raw = await asyncpg.connect(dsn)
+        try:
+            await raw.execute(sql)
+        finally:
+            await raw.close()
+
+    async def resolve_request(
+        self, raw_key: str, endpoint: str = ""
+    ) -> tuple[dict | None, "CallGraphDB"]:
         """Resolve a raw API key to (user, org_db).
 
-        Returns (None, control_db) for invalid keys so the request still has
-        a DB in the ContextVar — downstream permission checks will raise 401.
+        Admin keys (is_admin=True) resolve to (user, control_db) and bypass org routing.
+        Invalid/revoked keys resolve to (None, control_db) — downstream checks raise 401.
+        Auth events are logged as a background task (non-blocking).
         """
+        import asyncio
+        import hashlib
+        key_prefix = hashlib.sha256(raw_key.encode()).hexdigest()[:8]
+
         user = await self._control_db.get_user_by_key(raw_key)
         if user is None:
+            outcome = await self._control_db.check_key_outcome(raw_key)
+            asyncio.create_task(
+                self._control_db.log_auth_event(key_prefix, outcome, endpoint)
+            )
             return None, self._control_db
+
+        asyncio.create_task(
+            self._control_db.log_auth_event(key_prefix, "ok", endpoint)
+        )
+
+        if user.get("is_admin"):
+            return user, self._control_db
+
         org_id: str | None = user.get("org_id")
         org_db = await self._get_org_db(org_id)
         return user, org_db
+
+    async def log_no_key_event(self, endpoint: str = "") -> None:
+        """Log a no-key-sent auth event. Called for requests with no X-API-Key header."""
+        _SKIP = {"/api/health", "/admin/", "/favicon.ico"}
+        if endpoint in _SKIP or endpoint.startswith("/admin/") and endpoint.endswith(".html"):
+            return
+        await self._control_db.log_auth_event(None, "no-key-sent", endpoint)
 
     async def _get_org_db(self, org_id: str | None) -> "CallGraphDB":
         from starlette.exceptions import HTTPException

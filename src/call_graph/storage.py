@@ -2094,12 +2094,13 @@ class CallGraphDB:
         return raw_key
 
     async def get_user_by_key(self, raw_key: str) -> dict | None:
-        """Look up the user for a raw API key. Returns user dict (with org_id) or None."""
+        """Look up the user for a raw API key. Returns user dict (with org_id, is_admin) or None."""
         import hashlib
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
         async with self._db.execute(
-            """SELECT u.id, u.email, u.plan, u.created_at, k.org_id
+            """SELECT u.id, u.email, u.plan, u.created_at, k.org_id,
+                      COALESCE(k.is_admin, FALSE) AS is_admin
                FROM api_keys k JOIN users u ON u.id = k.user_id
                WHERE k.key_hash = ? AND k.revoked_at IS NULL""",
             (key_hash,),
@@ -2113,6 +2114,115 @@ class CallGraphDB:
         )
         await self._db.commit()
         return dict(row)
+
+    async def check_key_outcome(self, raw_key: str) -> str:
+        """Return 'ok', 'revoked', or 'unknown-key' for a raw API key (no side effects)."""
+        import hashlib
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        async with self._db.execute(
+            "SELECT revoked_at FROM api_keys WHERE key_hash = ?", (key_hash,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return "unknown-key"
+        return "revoked" if row["revoked_at"] else "ok"
+
+    async def log_auth_event(
+        self, key_prefix: str | None, outcome: str, endpoint: str = "", project_id: str = ""
+    ) -> None:
+        """Append one auth event row. Trims to 5000 rows after every 50 inserts."""
+        import uuid as _uuid
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO auth_events (id, created_at, key_prefix, outcome, endpoint, project_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (str(_uuid.uuid4()), now, key_prefix, outcome, endpoint or None, project_id or None),
+        )
+        await self._db.commit()
+        # Amortised trim: remove oldest rows when over 5000
+        async with self._db.execute("SELECT COUNT(*) AS n FROM auth_events") as cur:
+            row = await cur.fetchone()
+        count = row["n"] if row else 0
+        if count > 5000:
+            excess = count - 5000
+            await self._db.execute(
+                """DELETE FROM auth_events WHERE id IN (
+                       SELECT id FROM auth_events ORDER BY created_at ASC LIMIT ?
+                   )""",
+                (excess,),
+            )
+            await self._db.commit()
+
+    async def admin_list_keys(self) -> list[dict]:
+        """Return all API keys with owner info, newest first."""
+        async with self._db.execute(
+            """SELECT k.id, k.name, k.created_at, k.last_used, k.revoked_at,
+                      COALESCE(k.is_admin, FALSE) AS is_admin,
+                      k.org_id,
+                      u.email AS user_email,
+                      SUBSTR(k.key_hash, 1, 8) AS key_prefix
+               FROM api_keys k JOIN users u ON u.id = k.user_id
+               ORDER BY k.created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def admin_list_orgs(self) -> list[dict]:
+        """Return all orgs with member count."""
+        async with self._db.execute(
+            """SELECT o.id, o.slug, o.plan, o.created_at,
+                      COUNT(m.user_id) AS member_count
+               FROM organizations o
+               LEFT JOIN org_members m ON m.org_id = o.id
+               GROUP BY o.id
+               ORDER BY o.created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def admin_get_auth_log(self, limit: int = 200) -> list[dict]:
+        """Return recent auth events, newest first."""
+        async with self._db.execute(
+            """SELECT id, created_at, key_prefix, outcome, endpoint, project_id
+               FROM auth_events
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def admin_get_summary(self) -> dict:
+        """Return control-plane counts for the summary card."""
+        async with self._db.execute(
+            "SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NULL"
+        ) as cur:
+            active_keys = (await cur.fetchone())["n"]
+        async with self._db.execute(
+            "SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NOT NULL"
+        ) as cur:
+            revoked_keys = (await cur.fetchone())["n"]
+        async with self._db.execute("SELECT COUNT(*) AS n FROM organizations") as cur:
+            orgs = (await cur.fetchone())["n"]
+        async with self._db.execute("SELECT COUNT(*) AS n FROM users") as cur:
+            users = (await cur.fetchone())["n"]
+        # 401s in the last hour
+        one_hour_ago = (
+            datetime.now(timezone.utc).replace(microsecond=0) - __import__("datetime").timedelta(hours=1)
+        ).isoformat()
+        async with self._db.execute(
+            """SELECT COUNT(*) AS n FROM auth_events
+               WHERE outcome != 'ok' AND created_at > ?""",
+            (one_hour_ago,),
+        ) as cur:
+            recent_failures = (await cur.fetchone())["n"]
+        return {
+            "active_keys": active_keys,
+            "revoked_keys": revoked_keys,
+            "orgs": orgs,
+            "users": users,
+            "auth_failures_last_hour": recent_failures,
+        }
 
     async def get_org_db_url(self, org_id: str) -> str:
         """Return the db_url for the given org_id from the organizations table.

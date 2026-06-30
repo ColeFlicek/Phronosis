@@ -5,7 +5,8 @@
 set -euo pipefail
 
 SCOPENOS_URL="${SCOPENOS_URL:-http://100.71.88.106:3004}"
-SCOPENOS_API_KEY="${SCOPENOS_API_KEY:-}"  # required — set in shell profile or CI secrets
+# API key resolution order: env var → git config → empty (will 401)
+SCOPENOS_API_KEY="${SCOPENOS_API_KEY:-$(git config --get scopenos.apikey 2>/dev/null || true)}"
 
 CHANGED=$(git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null || true)
 
@@ -82,14 +83,23 @@ else
     [ -n "$f" ] && echo "\"${REPO_ROOT}/${f}\""
   done | paste -sd ',' - | sed 's/^/[/' | sed 's/$/]/')
 
-  curl --silent --show-error --max-time 30 \
+  INDEX_HTTP=$(curl --silent --max-time 30 -o /tmp/scopenos-index-resp.json -w "%{http_code}" \
     -X POST "${SCOPENOS_URL}/index" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: ${SCOPENOS_API_KEY}" \
     -d "{\"changed_files\": ${FILES_JSON}, \"project_root\": \"${REPO_ROOT}\", \"project_id\": \"${PROJECT_ID}\"}" \
-    > /dev/null
+    2>/dev/null || echo "000")
 
-  echo "[scopenos] index_changes triggered for $(echo "$CHANGED" | wc -l | tr -d ' ') files (project: ${PROJECT_ID})"
+  FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d ' ')
+  if [ "$INDEX_HTTP" = "200" ]; then
+    echo "[scopenos] index_changes: ${FILE_COUNT} files (project: ${PROJECT_ID})"
+  else
+    echo "[scopenos] ⚠ index_changes failed: HTTP ${INDEX_HTTP} — index may be stale" >&2
+    if [ -f /tmp/scopenos-index-resp.json ]; then
+      cat /tmp/scopenos-index-resp.json >&2
+      echo "" >&2
+    fi
+  fi
 fi
 
 # ── Contract check ──────────────────────────────────────────────────────────────
@@ -212,9 +222,13 @@ try:
         headers={"Content-Type": "application/json", "X-API-Key": api_key},
         method="POST",
     )
-    with urlopen(req, timeout=10) as r:
-        resp = json.loads(r.read())
-    print(f"[scopenos] decision logged ({type_}): {resp.get('decision_id', '')[:8]}")
+    from urllib.error import HTTPError
+    try:
+        with urlopen(req, timeout=10) as r:
+            resp = json.loads(r.read())
+        print(f"[scopenos] decision logged ({type_}): {resp.get('decision_id', '')[:8]}")
+    except HTTPError as e:
+        print(f"[scopenos] ⚠ decision log failed: HTTP {e.code} — check SCOPENOS_API_KEY", file=sys.stderr)
 except Exception as e:
     print(f"[scopenos] decision log skipped: {e}", file=sys.stderr)
 PYEOF
