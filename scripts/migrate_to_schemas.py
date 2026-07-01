@@ -2,13 +2,18 @@
 """
 Migration: move per-project data from public schema into project schemas.
 
-Run with:
-  python scripts/migrate_to_schemas.py --dry-run          # preview with counts (default)
-  python scripts/migrate_to_schemas.py --execute          # actually migrate
-  python scripts/migrate_to_schemas.py --execute --db-url postgresql://...
+Preferred usage — via K8s Job (no credentials in terminal):
+  kubectl apply -f k8s/migration-job.yaml
+  kubectl logs -f job/scopenos-migrate -n scopenos
+  kubectl delete job scopenos-migrate -n scopenos   # clean up after
 
-  # Re-run only the decision tables (if all other tables were already migrated):
-  python scripts/migrate_to_schemas.py --execute --decisions-only
+Direct usage — CONTROL_DB_URL resolves org DB URLs automatically:
+  CONTROL_DB_URL="..." python scripts/migrate_to_schemas.py --dry-run
+  CONTROL_DB_URL="..." python scripts/migrate_to_schemas.py --execute
+  CONTROL_DB_URL="..." python scripts/migrate_to_schemas.py --execute --decisions-only
+
+  # Or pass an org DB URL directly (bypasses control DB lookup):
+  python scripts/migrate_to_schemas.py --execute --db-url postgresql://...
 """
 import argparse
 import asyncio
@@ -272,18 +277,49 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--db-url",
         default="",
-        help="Postgres DSN for the org database. Defaults to ORG_DB_URL or DATABASE_URL env var.",
+        help="Postgres DSN for the org database. If omitted, resolved from CONTROL_DB_URL.",
     )
     return parser.parse_args()
 
 
+async def _resolve_org_db_urls(control_db_url: str) -> list[str]:
+    """Query the control DB and return all org db_url values."""
+    import asyncpg
+    conn = await asyncpg.connect(control_db_url)
+    try:
+        rows = await conn.fetch("SELECT slug, db_url FROM organizations WHERE db_url != ''")
+        urls = []
+        for r in rows:
+            print(f"  Found org: {r['slug']}")
+            urls.append(r["db_url"])
+        return urls
+    finally:
+        await conn.close()
+
+
 if __name__ == "__main__":
     args = _parse_args()
-    db_url = (
-        args.db_url
-        or os.getenv("ORG_DB_URL")
-        or os.getenv("DATABASE_URL")
-        or "postgresql://scopenos:scopenos@localhost/scopenos"
-    )
     dry_run = not args.execute
-    asyncio.run(migrate(db_url, dry_run=dry_run, decisions_only=args.decisions_only))
+
+    if args.db_url:
+        # Explicit URL — run directly
+        asyncio.run(migrate(args.db_url, dry_run=dry_run, decisions_only=args.decisions_only))
+    else:
+        # Resolve org DB URLs from control DB — credentials never touch the terminal
+        control_db_url = os.getenv("CONTROL_DB_URL")
+        if not control_db_url:
+            print(
+                "ERROR: No --db-url given and CONTROL_DB_URL is not set.\n"
+                "Set CONTROL_DB_URL or pass --db-url explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        print("Resolving org databases from control DB...")
+        org_urls = asyncio.run(_resolve_org_db_urls(control_db_url))
+        if not org_urls:
+            print("No org databases found in control DB.")
+            sys.exit(0)
+
+        for db_url in org_urls:
+            asyncio.run(migrate(db_url, dry_run=dry_run, decisions_only=args.decisions_only))

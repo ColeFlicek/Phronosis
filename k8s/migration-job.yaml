@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scopenos-migrate
+  namespace: scopenos
+spec:
+  ttlSecondsAfterFinished: 600   # auto-delete 10 min after completion
+  backoffLimit: 0                # never retry — migrations are not idempotent under failure
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ghcr.io/coleflicek/scopenos:latest
+          command:
+            - python
+            - scripts/migrate_to_schemas.py
+            - --decisions-only   # remove this flag to migrate all tables
+            - --dry-run          # CHANGE TO --execute WHEN READY
+          envFrom:
+            - secretRef:
+                name: scopenos-secrets
+            - configMapRef:
+                name: scopenos-config
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

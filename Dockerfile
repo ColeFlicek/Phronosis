@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY schema_org.sql .
 COPY scripts/bootstrap_api_key.py ./scripts/bootstrap_api_key.py
+COPY scripts/migrate_to_schemas.py ./scripts/migrate_to_schemas.py
 
 EXPOSE 3004
 
